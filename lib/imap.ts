@@ -2,6 +2,33 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { convert } from 'html-to-text';
 import type { MailboxInfo, MessageDetail, MessageSummary } from './types.js';
+import {
+  acquireUndoLock,
+  createPendingOperation,
+  getOperation,
+  listOperations,
+  markConfirmed,
+  markFailed,
+  markUncertain,
+  markUndone,
+  releaseUndoLock,
+  type MoveIdentity,
+  type MoveOperationRecord,
+} from './moveLog.js';
+
+// Network/protocol conditions where the server's actual state is unknown —
+// the command may or may not have taken effect. Everything else (auth
+// failures, explicit NO/BAD responses, folder-not-found, etc.) is treated as
+// a clean failure: the server was reached and clearly rejected the command.
+const UNCERTAIN_ERROR_CODES = new Set(['ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ECONNABORTED']);
+
+function isUncertainMoveError(error: unknown): boolean {
+  if (error && typeof error === 'object' && 'code' in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && UNCERTAIN_ERROR_CODES.has(code)) return true;
+  }
+  return false;
+}
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -235,24 +262,224 @@ export interface MoveMessageParams {
   targetFolder: string;
 }
 
-export async function moveMessage(params: MoveMessageParams): Promise<void> {
+export interface MoveMessageResult {
+  operationId: string | null;
+}
+
+async function executeLoggedMove(
+  client: ImapFlow,
+  args: { sourcePath: string; uid: number; destPath: string; undoOf?: string },
+): Promise<{ operationId: string }> {
+  const lock = await client.getMailboxLock(args.sourcePath);
+  let operationId: string;
+  try {
+    const meta = await client.fetchOne(String(args.uid), { envelope: true }, { uid: true });
+    const envelope = meta ? meta.envelope : undefined;
+    const identity: MoveIdentity = {
+      messageId: envelope?.messageId ?? null,
+      date: envelope?.date ? envelope.date.toISOString() : null,
+      subject: envelope?.subject ?? null,
+    };
+    const sourceUidValidity = client.mailbox !== false ? client.mailbox.uidValidity : 0n;
+    operationId = await createPendingOperation({
+      sourcePath: args.sourcePath,
+      sourceUid: args.uid,
+      sourceUidValidity,
+      destPath: args.destPath,
+      identity,
+      undoOf: args.undoOf,
+    });
+  } finally {
+    lock.release();
+  }
+
+  const lock2 = await client.getMailboxLock(args.sourcePath);
+  try {
+    let moveResult;
+    try {
+      moveResult = await client.messageMove(String(args.uid), args.destPath, { uid: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isUncertainMoveError(error)) {
+        await markUncertain(operationId, message);
+      } else {
+        await markFailed(operationId, message);
+      }
+      throw error;
+    }
+    if (!moveResult || moveResult.uidMap === undefined || moveResult.uidValidity === undefined) {
+      await markUncertain(
+        operationId,
+        'Server did not confirm the move with a destination UID (no UIDPLUS support detected).',
+      );
+      throw new Error(
+        `Move of message uid ${args.uid} to "${args.destPath}" could not be confirmed: the server did not report UIDPLUS details. The operation is recorded as uncertain.`,
+      );
+    }
+    const destUid = moveResult.uidMap.get(args.uid);
+    if (destUid === undefined) {
+      await markUncertain(operationId, 'Server did not report a destination UID for this message.');
+      throw new Error(
+        `Move of message uid ${args.uid} to "${args.destPath}" could not be confirmed: no destination UID was returned. The operation is recorded as uncertain.`,
+      );
+    }
+    await markConfirmed(operationId, { destUid, destUidValidity: moveResult.uidValidity });
+    return { operationId };
+  } finally {
+    lock2.release();
+  }
+}
+
+export async function moveMessage(params: MoveMessageParams): Promise<MoveMessageResult> {
   const client = getClient();
   await client.connect();
   try {
     const mailboxes = await client.list();
     assertMoveAllowed(mailboxes, params.folder, params.targetFolder);
     if (params.folder === params.targetFolder) {
-      return; // explicit no-op
+      return { operationId: null }; // explicit no-op, nothing to log or undo
     }
-    const lock = await client.getMailboxLock(params.folder);
-    try {
-      await client.messageMove(String(params.uid), params.targetFolder, { uid: true });
-    } finally {
-      lock.release();
-    }
+    const { operationId } = await executeLoggedMove(client, {
+      sourcePath: params.folder,
+      uid: params.uid,
+      destPath: params.targetFolder,
+    });
+    return { operationId };
   } finally {
     await client.logout();
   }
+}
+
+function identityMatches(
+  a: { messageId: string | null; date: string | null; subject: string | null },
+  b: { messageId: string | null; date: string | null; subject: string | null },
+): boolean {
+  if (a.messageId && b.messageId) return a.messageId === b.messageId;
+  return a.date === b.date && a.subject === b.subject;
+}
+
+async function findByIdentity(
+  client: ImapFlow,
+  folder: string,
+  identity: MoveOperationRecord['identity'],
+): Promise<number | null> {
+  const lock = await client.getMailboxLock(folder);
+  try {
+    const uids = await client.search({ header: { 'message-id': identity.messageId ?? '' } }, { uid: true });
+    return uids && uids.length > 0 ? uids[0] : null;
+  } finally {
+    lock.release();
+  }
+}
+
+export async function undoMove(operationId: string): Promise<{ newOperationId: string }> {
+  const locked = await acquireUndoLock(operationId);
+  if (!locked) {
+    throw new Error(`An undo for operation ${operationId} is already in progress. Try again shortly.`);
+  }
+  try {
+    const record = await getOperation(operationId);
+    if (!record) {
+      throw new Error(`Move operation ${operationId} not found or has expired.`);
+    }
+    if (record.status === 'undone') {
+      return { newOperationId: record.undoneBy as string };
+    }
+    if (record.status === 'failed' || record.destUid === null) {
+      throw new Error(`Move operation ${operationId} has nothing to undo (the original move did not complete).`);
+    }
+
+    const client = getClient();
+    await client.connect();
+    try {
+      let effectiveRecord = record;
+      if (record.status === 'uncertain') {
+        const sourceMatch = await findByIdentity(client, record.sourcePath, record.identity);
+        const destMatch = await findByIdentity(client, record.destPath, record.identity);
+        if (sourceMatch !== null && destMatch === null) {
+          await markFailed(
+            operationId,
+            'Reconciliation found the message still at the source folder; the move did not occur.',
+          );
+          throw new Error(`Move operation ${operationId} has nothing to undo (the original move did not occur).`);
+        }
+        if (destMatch !== null && sourceMatch === null) {
+          const destInfoLock = await client.getMailboxLock(record.destPath);
+          let destUidValidity: bigint;
+          try {
+            destUidValidity = client.mailbox !== false ? client.mailbox.uidValidity : 0n;
+          } finally {
+            destInfoLock.release();
+          }
+          await markConfirmed(operationId, { destUid: destMatch, destUidValidity });
+          effectiveRecord = {
+            ...record,
+            status: 'confirmed',
+            destUid: destMatch,
+            destUidValidity: destUidValidity.toString(),
+          };
+        } else {
+          throw new Error(
+            `Cannot automatically reconcile move operation ${operationId}: manual verification is required.`,
+          );
+        }
+      }
+
+      const destUid = effectiveRecord.destUid as number;
+      const mailboxes = await client.list();
+      assertMoveAllowed(mailboxes, effectiveRecord.destPath, effectiveRecord.sourcePath);
+
+      const destLock = await client.getMailboxLock(effectiveRecord.destPath);
+      let destMeta;
+      try {
+        destMeta = await client.fetchOne(String(destUid), { envelope: true }, { uid: true });
+      } finally {
+        destLock.release();
+      }
+      const liveUidValidity = client.mailbox !== false ? client.mailbox.uidValidity : null;
+      if (liveUidValidity === null || liveUidValidity.toString() !== effectiveRecord.destUidValidity) {
+        throw new Error(
+          `Cannot undo move operation ${operationId}: the destination folder's UIDVALIDITY has changed since the move, so UIDs are no longer trustworthy.`,
+        );
+      }
+      if (!destMeta) {
+        throw new Error(
+          `Cannot undo move operation ${operationId}: the message is no longer at the recorded destination.`,
+        );
+      }
+      const liveIdentity = {
+        messageId: destMeta.envelope?.messageId ?? null,
+        date: destMeta.envelope?.date ? destMeta.envelope.date.toISOString() : null,
+        subject: destMeta.envelope?.subject ?? null,
+      };
+      if (!identityMatches(liveIdentity, effectiveRecord.identity)) {
+        throw new Error(
+          `Cannot undo move operation ${operationId}: the message at the recorded destination UID no longer matches what was originally moved.`,
+        );
+      }
+
+      const { operationId: newOperationId } = await executeLoggedMove(client, {
+        sourcePath: effectiveRecord.destPath,
+        uid: destUid,
+        destPath: effectiveRecord.sourcePath,
+        undoOf: operationId,
+      });
+      await markUndone(operationId, newOperationId);
+      return { newOperationId };
+    } finally {
+      await client.logout();
+    }
+  } finally {
+    await releaseUndoLock(operationId);
+  }
+}
+
+export async function listMoveOperations(params: { limit?: number; cursor?: number }) {
+  return listOperations({ limit: params.limit, cursor: params.cursor });
+}
+
+export async function getMoveOperation(operationId: string): Promise<MoveOperationRecord | null> {
+  return getOperation(operationId);
 }
 
 export interface FlagMessageParams {
