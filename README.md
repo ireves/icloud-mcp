@@ -66,8 +66,8 @@ Both read from a local `.env` file and print what they find. Run them separately
 | Tool | Description |
 |---|---|
 | `list_calendars` | List event calendars |
-| `list_events` | List events in a calendar within a date range |
-| `get_event` | Get full details for one event |
+| `list_events` | List events in a calendar within a date range (max 366 days); occurrence identifiers are stable and resolve to the exact occurrence |
+| `get_event` | Get full details for one event or occurrence (explicit error if the occurrence can no longer be resolved) |
 | `create_event` | Create a personal event (no attendees, no invitations) |
 | `update_event` | Update fields on an existing event (no attendees, no invitations) |
 
