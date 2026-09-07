@@ -239,6 +239,11 @@ export async function moveMessage(params: MoveMessageParams): Promise<void> {
   const client = getClient();
   await client.connect();
   try {
+    const mailboxes = await client.list();
+    assertMoveAllowed(mailboxes, params.folder, params.targetFolder);
+    if (params.folder === params.targetFolder) {
+      return; // explicit no-op
+    }
     const lock = await client.getMailboxLock(params.folder);
     try {
       await client.messageMove(String(params.uid), params.targetFolder, { uid: true });
