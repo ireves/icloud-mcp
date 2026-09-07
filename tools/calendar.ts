@@ -33,7 +33,7 @@ export function registerCalendarTools(server: McpServer): void {
     {
       title: 'List Events',
       description:
-        'Lists event summaries (title, start/end, location, whether it has attendees) in a calendar within a date range.',
+        'Lists event summaries (title, start/end, location, whether it has attendees, whether it is part of a recurring series) in a calendar within a date range. The date range cannot exceed 366 days.',
       inputSchema: {
         calendar_id: z.string().describe('Calendar identifier, from list_calendars'),
         start_date: z.string().describe('ISO 8601 start of the date range, with an explicit "Z" or timezone offset'),
@@ -58,7 +58,8 @@ export function registerCalendarTools(server: McpServer): void {
     'get_event',
     {
       title: 'Get Event',
-      description: 'Returns full details for one event.',
+      description:
+        'Returns full details for one event or occurrence. An occurrence identifier that no longer resolves (moved, cancelled, or excluded) returns an explicit error rather than the wrong event.',
       inputSchema: {
         calendar_id: z.string().describe('Calendar identifier'),
         event_id: z.string().describe('Event identifier, from list_events'),
@@ -110,7 +111,7 @@ export function registerCalendarTools(server: McpServer): void {
     {
       title: 'Update Event',
       description:
-        'Updates fields on an existing event. Only include the fields that are changing. Never adds attendees or sends invitations. Rejects events that already have attendees/an organizer (to avoid triggering meeting-update notifications) and events that are part of a recurring series (not yet supported).',
+        'Updates fields on an existing event. Only include the fields that are changing. Never adds attendees or sends invitations. Rejects events that already have attendees/an organiser (to avoid triggering meeting-update notifications), events that are part of a recurring series (not yet supported), and attempts to set timed values on an all-day event.',
       inputSchema: {
         calendar_id: z.string().describe('Calendar identifier'),
         event_id: z.string().describe('Event identifier, from list_events'),
