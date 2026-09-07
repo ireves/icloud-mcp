@@ -58,7 +58,7 @@ Both read from a local `.env` file and print what they find. Run them separately
 | `list_messages` | List message headers in a folder (subject, sender, date, unread, UID) |
 | `get_message` | Get full headers and body for one message (HTML converted to plain text) |
 | `mark_message` | Mark a message read/unread |
-| `move_message` | Move a message to another folder |
+| `move_message` | Move a message to another folder (moves into Trash/Junk are blocked by default, server-enforced) |
 | `flag_message` | Flag/unflag a message |
 
 ### Calendar (CalDAV)
@@ -80,6 +80,12 @@ Both read from a local `.env` file and print what they find. Run them separately
 | `get_reminder` | Get full details for one reminder |
 | `create_reminder` | Create a reminder |
 | `complete_reminder` | Mark a reminder completed or reopen it |
+
+## Mailbox safety
+
+`move_message` blocks moves into any folder whose IMAP special-use metadata (or, as a fallback, exact folder name) identifies it as Trash or Junk. This is enforced in the server itself — there is no tool parameter that can override it, and no combination of agent instructions changes it. Moving a message *out of* Trash or Junk (recovery) is always allowed.
+
+To lift the restriction, an operator (not the agent) sets `ALLOW_TRASH_JUNK_MOVES=true` in the deployment's environment variables. Leave it unset for the default, safer behaviour.
 
 ## v1 scope
 
