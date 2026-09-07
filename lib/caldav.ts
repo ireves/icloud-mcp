@@ -83,8 +83,12 @@ function isSchedulingObject(vevent: ICAL.Component): boolean {
   return vevent.getAllProperties('attendee').length > 0 || Boolean(vevent.getFirstProperty('organizer'));
 }
 
-function isRecurringVevent(vevent: ICAL.Component): boolean {
-  return Boolean(vevent.getFirstProperty('rrule')) || Boolean(vevent.getFirstProperty('recurrence-id'));
+export function isRecurringVevent(vevent: ICAL.Component): boolean {
+  return (
+    Boolean(vevent.getFirstProperty('rrule')) ||
+    Boolean(vevent.getFirstProperty('recurrence-id')) ||
+    Boolean(vevent.getFirstProperty('rdate'))
+  );
 }
 
 let cachedClient: DAVClient | null = null;
