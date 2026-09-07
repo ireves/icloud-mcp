@@ -23,8 +23,8 @@ async function freshMoveLog() {
   for (const fn of Object.values(mockRedis)) {
     if (typeof fn === 'function' && 'mockReset' in fn) (fn as ReturnType<typeof vi.fn>).mockReset();
   }
-  process.env.UPSTASH_REDIS_REST_URL = 'https://example.upstash.io';
-  process.env.UPSTASH_REDIS_REST_TOKEN = 'test-token';
+  process.env.KV_REST_API_URL = 'https://example.upstash.io';
+  process.env.KV_REST_API_TOKEN = 'test-token';
   return import('../../lib/moveLog.js');
 }
 

@@ -47,7 +47,7 @@ TTL: 7 days from `createdAt`, applied via `EXPIRE` right after the initial write
 ## Module structure
 
 **`lib/moveLog.ts`** (new) — owns the Redis client and schema:
-- `getRedis()` — constructs `@upstash/redis`'s `Redis` client from `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`.
+- `getRedis()` — constructs `@upstash/redis`'s `Redis` client from `KV_REST_API_URL` / `KV_REST_API_TOKEN`.
 - `createPendingOperation(params)` → writes the initial record + sorted-set entry + TTL, returns `operationId`.
 - `markConfirmed(operationId, { destUid, destUidValidity })`.
 - `markFailed(operationId, error)` / `markUncertain(operationId, error)`.
@@ -116,4 +116,4 @@ New `test/lib/moveLog.test.ts` and `test/lib/imap-undo.test.ts`, mocking `@upsta
 
 ## Environment
 
-New required variables (provided automatically by the Vercel Upstash integration): `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`. Documented in `.env.example` and README. No new operator toggles in this phase.
+New required variables (provided automatically by the Vercel Upstash integration): `KV_REST_API_URL`, `KV_REST_API_TOKEN`. Documented in `.env.example` and README. No new operator toggles in this phase.

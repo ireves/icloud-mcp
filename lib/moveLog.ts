@@ -61,8 +61,10 @@ let cachedClient: Redis | null = null;
 export function getRedis(): Redis {
   if (cachedClient) return cachedClient;
   cachedClient = new Redis({
-    url: requireEnv('UPSTASH_REDIS_REST_URL'),
-    token: requireEnv('UPSTASH_REDIS_REST_TOKEN'),
+    // Vercel's Upstash marketplace integration names these KV_REST_API_* —
+    // not UPSTASH_REDIS_REST_* — regardless of the underlying Upstash product.
+    url: requireEnv('KV_REST_API_URL'),
+    token: requireEnv('KV_REST_API_TOKEN'),
   });
   return cachedClient;
 }
