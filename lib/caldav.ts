@@ -326,26 +326,33 @@ export async function updateEvent(params: UpdateEventParams): Promise<void> {
   }
   const jcal = ICAL.parse(obj.data);
   const comp = new ICAL.Component(jcal);
-  const vevent = comp.getFirstSubcomponent('vevent');
-  if (!vevent) {
+  const vevents = comp.getAllSubcomponents('vevent');
+  if (vevents.length === 0) {
     throw new Error(`Event ${params.eventId} has no VEVENT body`);
   }
-  if (isSchedulingObject(vevent)) {
-    throw new Error(
-      `Event ${params.eventId} has attendees or an organizer. Updating a scheduling object can trigger CalDAV meeting-update notifications to those attendees, which this tool never does — edit it directly in Calendar.app instead.`,
-    );
-  }
-  if (isRecurringVevent(vevent)) {
+  if (vevents.some(isRecurringVevent)) {
     throw new Error(
       `Event ${params.eventId} is part of a recurring series. Editing a single occurrence or the whole series is not yet supported — edit it directly in Calendar.app instead.`,
     );
   }
+  if (vevents.some(isSchedulingObject)) {
+    throw new Error(
+      `Event ${params.eventId} has attendees or an organizer. Updating a scheduling object can trigger CalDAV meeting-update notifications to those attendees, which this tool never does — edit it directly in Calendar.app instead.`,
+    );
+  }
+  const vevent = vevents[0];
 
-  const currentStart = vevent.getFirstPropertyValue('dtstart') as ICAL.Time | null;
-  const currentEnd = vevent.getFirstPropertyValue('dtend') as ICAL.Time | null;
+  const currentStartProp = vevent.getFirstPropertyValue('dtstart') as ICAL.Time | null;
+  if (currentStartProp?.isDate && (params.startTime !== undefined || params.endTime !== undefined)) {
+    throw new Error(
+      `Event ${params.eventId} is an all-day event. Updating its time-based fields with timed values is not supported.`,
+    );
+  }
+
+  const currentEnd = getEffectiveEnd(vevent);
   const newStart = params.startTime !== undefined
     ? parseRequiredDateTime(params.startTime, 'start_time')
-    : (currentStart?.toJSDate() ?? null);
+    : (currentStartProp?.toJSDate() ?? null);
   const newEnd = params.endTime !== undefined
     ? parseRequiredDateTime(params.endTime, 'end_time')
     : (currentEnd?.toJSDate() ?? null);
@@ -356,9 +363,12 @@ export async function updateEvent(params: UpdateEventParams): Promise<void> {
   if (params.title !== undefined) vevent.updatePropertyWithValue('summary', params.title);
   if (params.startTime !== undefined && newStart) {
     vevent.updatePropertyWithValue('dtstart', ICAL.Time.fromJSDate(newStart, true));
+    vevent.getFirstProperty('dtstart')?.removeParameter('tzid');
   }
   if (params.endTime !== undefined && newEnd) {
+    vevent.removeProperty('duration');
     vevent.updatePropertyWithValue('dtend', ICAL.Time.fromJSDate(newEnd, true));
+    vevent.getFirstProperty('dtend')?.removeParameter('tzid');
   }
   if (params.location !== undefined) vevent.updatePropertyWithValue('location', params.location);
   if (params.notes !== undefined) vevent.updatePropertyWithValue('description', params.notes);
