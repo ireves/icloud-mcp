@@ -35,15 +35,15 @@ Tool router ── dispatches to:
 Thin wrapper around `imapflow`. Opens a connection per request (no persistent pool, since serverless functions are short-lived and stateless between invocations), authenticates with the app-specific password, and exposes functions matching the 6 mail tools. Always closes the connection in a `finally` block.
 
 ### `lib/caldav.ts` — CalDAV client wrapper
-Wrapper around `tsdav`. Performs service discovery against `caldav.icloud.com` (principal URL lookup — never hardcode account-specific paths). Exposes functions for the 5 calendar tools and 4 reminder tools. Calendars and reminder lists are fetched through the same discovery call and distinguished by whether their components include `VEVENT` or `VTODO`.
+Wrapper around `tsdav`. Performs service discovery against `caldav.icloud.com` (principal URL lookup — never hardcode account-specific paths). Exposes functions for the 5 calendar tools and 5 reminder tools. Calendars and reminder lists are fetched through the same discovery call and distinguished by whether their components include `VEVENT` or `VTODO`.
 
 ### `lib/auth.ts` — Bearer token check
 Compares the `Authorization: Bearer <token>` header against `MCP_AUTH_TOKEN` using constant-time comparison. Rejects (401) before any IMAP/CalDAV call is made if missing or wrong.
 
 ### `api/mcp.ts` — MCP HTTP handler
-Vercel function wiring: auth check → MCP SDK server instance with all 15 tools registered → request handled. Node.js runtime explicitly set via Vercel config.
+Vercel function wiring: auth check → MCP SDK server instance with all 16 tools registered → request handled. Node.js runtime explicitly set via Vercel config.
 
-### Tools (15 total, per the brief)
+### Tools (16 total, per the brief)
 
 **Mail (IMAP):** `list_folders`, `list_messages`, `get_message`, `mark_message`, `move_message`, `flag_message`
 **Calendar (CalDAV):** `list_calendars`, `list_events`, `get_event`, `create_event`, `update_event`
@@ -76,7 +76,7 @@ Calendar/reminder tools follow the same shape: open (or reuse discovery) → Cal
 ## Testing
 
 - `scripts/test-imap.ts` and `scripts/test-caldav.ts` for local, credential-based smoke tests of each protocol independently.
-- After deploy, manual verification: add the Vercel URL as a Claude custom connector and invoke each of the 15 tools once before wiring any scheduled task.
+- After deploy, manual verification: add the Vercel URL as a Claude custom connector and invoke each of the 16 tools once before wiring any scheduled task.
 - No automated unit/integration test suite for v1 — the brief's testing expectations are connection-level smoke tests plus manual tool verification, not a CI test suite.
 
 ## Deployment & config
