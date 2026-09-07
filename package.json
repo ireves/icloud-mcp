@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test:imap": "tsx scripts/test-imap.ts",
