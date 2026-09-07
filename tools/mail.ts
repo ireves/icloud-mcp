@@ -3,10 +3,13 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   flagMessage,
   getMessage,
+  getMoveOperation,
   listFolders,
   listMessages,
+  listMoveOperations,
   markMessage,
   moveMessage,
+  undoMove,
 } from '../lib/imap.js';
 
 function toResult(data: unknown) {
@@ -151,6 +154,69 @@ export function registerMailTools(server: McpServer): void {
       try {
         await flagMessage({ folder: args.folder, uid: args.uid, flagged: args.flagged });
         return toResult({ ok: true });
+      } catch (error) {
+        return toErrorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'undo_move',
+    {
+      title: 'Undo Message Move',
+      description:
+        "Reverses a previous move_message operation, using its operation_id. Verifies the destination folder's UIDVALIDITY and the message's identity before moving anything back, and applies the same Trash/Junk destination policy as move_message in reverse. Operations remain undoable for 7 days. An uncertain operation (the original move could not be confirmed) is automatically reconciled where possible before undoing.",
+      inputSchema: {
+        operation_id: z.string().describe('The operation_id returned by move_message or a previous undo_move'),
+      },
+    },
+    async (args) => {
+      try {
+        const { newOperationId } = await undoMove(args.operation_id);
+        return toResult({ ok: true, operation_id: newOperationId });
+      } catch (error) {
+        return toErrorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'list_move_operations',
+    {
+      title: 'List Move Operations',
+      description:
+        'Lists recent move_message operations, most recent first, including their status (pending, confirmed, failed, uncertain, or undone). Use with undo_move to reverse a move, or get_move_operation to inspect one in detail.',
+      inputSchema: {
+        limit: z.number().int().positive().max(100).optional().describe('Max operations to return, default 20'),
+        cursor: z.number().int().nonnegative().optional().describe("Pagination cursor from a previous call's next_cursor"),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await listMoveOperations({ limit: args.limit, cursor: args.cursor });
+        return toResult({ operations: result.operations, next_cursor: result.nextCursor });
+      } catch (error) {
+        return toErrorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'get_move_operation',
+    {
+      title: 'Get Move Operation',
+      description: 'Returns the full record for one move_message operation by its operation_id.',
+      inputSchema: {
+        operation_id: z.string().describe('The operation_id to look up'),
+      },
+    },
+    async (args) => {
+      try {
+        const record = await getMoveOperation(args.operation_id);
+        if (!record) {
+          return toErrorResult(new Error(`Move operation ${args.operation_id} not found or has expired.`));
+        }
+        return toResult(record);
       } catch (error) {
         return toErrorResult(error);
       }
