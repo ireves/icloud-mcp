@@ -33,11 +33,38 @@ const VTODO_FILTERS = [
   },
 ];
 
-function parseRequiredDateTime(value: string, fieldName: string): Date {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(value)) {
+export function parseRequiredDateTime(value: string, fieldName: string): Date {
+  const match = value.match(
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?(?:\.\d+)?(Z|[+-]\d{2}:\d{2})$/,
+  );
+  if (!match) {
     throw new Error(
       `${fieldName} must be an ISO 8601 date-time with an explicit UTC "Z" or timezone offset, got: "${value}"`,
     );
+  }
+  const [, y, mo, d, h, mi, s, offset] = match;
+  const [year, month, day, hour, minute, second] = [y, mo, d, h, mi, s ?? '0'].map(Number);
+  if (hour > 23 || minute > 59 || second > 60) {
+    throw new Error(`${fieldName} has an invalid time component: "${value}"`);
+  }
+  if (offset !== 'Z') {
+    const [offH, offM] = offset.slice(1).split(':').map(Number);
+    if (offH > 23 || offM > 59) {
+      throw new Error(`${fieldName} has an invalid timezone offset: "${value}"`);
+    }
+  }
+  // Reconstruct the parsed calendar-date components in UTC and compare back —
+  // this catches 30 February / 31 April / 29 February in a non-leap year,
+  // which `new Date()` would otherwise silently roll forward into the next
+  // month. The offset only shifts the instant, never the calendar date being
+  // validated here, so it's intentionally ignored in this reconstruction.
+  const reconstructed = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+  if (
+    reconstructed.getUTCFullYear() !== year ||
+    reconstructed.getUTCMonth() !== month - 1 ||
+    reconstructed.getUTCDate() !== day
+  ) {
+    throw new Error(`${fieldName} is not a valid calendar date: "${value}"`);
   }
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -46,7 +73,7 @@ function parseRequiredDateTime(value: string, fieldName: string): Date {
   return date;
 }
 
-function assertStartBeforeEnd(start: Date, end: Date): void {
+export function assertStartBeforeEnd(start: Date, end: Date): void {
   if (start.getTime() >= end.getTime()) {
     throw new Error(`start_time (${start.toISOString()}) must be before end_time (${end.toISOString()})`);
   }
