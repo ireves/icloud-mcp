@@ -1,0 +1,29 @@
+{
+  "name": "icloud-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test:imap": "tsx scripts/test-imap.ts",
+    "test:caldav": "tsx scripts/test-caldav.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@vercel/node": "^3.2.0",
+    "html-to-text": "^9.0.5",
+    "ical.js": "^2.1.0",
+    "imapflow": "^1.0.171",
+    "mailparser": "^3.7.1",
+    "tsdav": "^2.0.6",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/html-to-text": "^9.0.4",
+    "@types/mailparser": "^3.4.4",
+    "@types/node": "^20.14.2",
+    "dotenv": "^16.4.5",
+    "tsx": "^4.15.6",
+    "typescript": "^5.4.5"
+  }
+}
