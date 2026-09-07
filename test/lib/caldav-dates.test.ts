@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { parseRequiredDateTime, assertStartBeforeEnd } from '../../lib/caldav.js';
+import ICAL from 'ical.js';
+import { parseRequiredDateTime, assertStartBeforeEnd, getEffectiveEnd } from '../../lib/caldav.js';
+
+function parseFirstVevent(ics: string): ICAL.Component {
+  const jcal = ICAL.parse(ics);
+  const comp = new ICAL.Component(jcal);
+  const vevent = comp.getFirstSubcomponent('vevent');
+  if (!vevent) throw new Error('fixture has no VEVENT');
+  return vevent;
+}
 
 describe('parseRequiredDateTime', () => {
   it('accepts a valid UTC date-time', () => {
@@ -69,5 +78,43 @@ describe('assertStartBeforeEnd', () => {
   it('rejects an equal start and end', () => {
     const same = new Date('2026-01-01T00:00:00Z');
     expect(() => assertStartBeforeEnd(same, same)).toThrow(/must be before/);
+  });
+});
+
+describe('getEffectiveEnd', () => {
+  it('returns DTEND when present', () => {
+    const vevent = parseFirstVevent(
+      'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:20260914T100000Z\r\nDTEND:20260914T110000Z\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n',
+    );
+    const end = getEffectiveEnd(vevent);
+    expect(end?.toJSDate().toISOString()).toBe('2026-09-14T11:00:00.000Z');
+  });
+
+  it('derives the end from DTSTART + DURATION', () => {
+    const vevent = parseFirstVevent(
+      'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:20260914T100000Z\r\nDURATION:PT1H30M\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n',
+    );
+    const end = getEffectiveEnd(vevent);
+    expect(end?.toJSDate().toISOString()).toBe('2026-09-14T11:30:00.000Z');
+  });
+
+  it('derives an implicit zero-length end for a timed event with neither DTEND nor DURATION', () => {
+    const vevent = parseFirstVevent(
+      'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nDTSTAMP:20260101T000000Z\r\nDTSTART:20260914T100000Z\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n',
+    );
+    const end = getEffectiveEnd(vevent);
+    expect(end?.toJSDate().toISOString()).toBe('2026-09-14T10:00:00.000Z');
+  });
+
+  it('derives an implicit one-day end for an all-day event with neither DTEND nor DURATION', () => {
+    const vevent = parseFirstVevent(
+      'BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:a\r\nDTSTAMP:20260101T000000Z\r\nDTSTART;VALUE=DATE:20260914\r\nSUMMARY:x\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n',
+    );
+    const end = getEffectiveEnd(vevent);
+    // Compare via ICAL's own date string, not toJSDate(): for an all-day
+    // (isDate) value, toJSDate() returns local midnight, which shifts across
+    // a UTC ISO conversion depending on the machine's timezone.
+    expect(end?.toString()).toBe('2026-09-15');
+    expect(end?.isDate).toBe(true);
   });
 });

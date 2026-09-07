@@ -83,6 +83,28 @@ function isSchedulingObject(vevent: ICAL.Component): boolean {
   return vevent.getAllProperties('attendee').length > 0 || Boolean(vevent.getFirstProperty('organizer'));
 }
 
+export function getEffectiveEnd(vevent: ICAL.Component): ICAL.Time | null {
+  const dtend = vevent.getFirstPropertyValue('dtend') as ICAL.Time | null;
+  if (dtend) return dtend;
+  const dtstart = vevent.getFirstPropertyValue('dtstart') as ICAL.Time | null;
+  if (!dtstart) return null;
+  const duration = vevent.getFirstPropertyValue('duration') as ICAL.Duration | null;
+  if (duration) {
+    const end = dtstart.clone();
+    end.addDuration(duration);
+    return end;
+  }
+  // RFC 5545 3.6.1: with neither DTEND nor DURATION, a DATE-TIME DTSTART's
+  // implicit end equals DTSTART; a DATE (all-day) DTSTART's implicit end is
+  // DTSTART + 1 day.
+  if (dtstart.isDate) {
+    const end = dtstart.clone();
+    end.adjust(1, 0, 0, 0);
+    return end;
+  }
+  return dtstart.clone();
+}
+
 export function isRecurringVevent(vevent: ICAL.Component): boolean {
   return (
     Boolean(vevent.getFirstProperty('rrule')) ||
