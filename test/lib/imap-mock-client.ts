@@ -7,6 +7,8 @@ export function createMockImapClient() {
     list: vi.fn(),
     getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
     messageMove: vi.fn(),
+    fetchOne: vi.fn(),
+    mailbox: { uidValidity: 1000n } as { uidValidity: bigint } | false,
   };
 }
 

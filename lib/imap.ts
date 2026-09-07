@@ -2,6 +2,21 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { convert } from 'html-to-text';
 import type { MailboxInfo, MessageDetail, MessageSummary } from './types.js';
+import { createPendingOperation, markConfirmed, markFailed, markUncertain, type MoveIdentity } from './moveLog.js';
+
+// Network/protocol conditions where the server's actual state is unknown —
+// the command may or may not have taken effect. Everything else (auth
+// failures, explicit NO/BAD responses, folder-not-found, etc.) is treated as
+// a clean failure: the server was reached and clearly rejected the command.
+const UNCERTAIN_ERROR_CODES = new Set(['ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ECONNABORTED']);
+
+function isUncertainMoveError(error: unknown): boolean {
+  if (error && typeof error === 'object' && 'code' in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && UNCERTAIN_ERROR_CODES.has(code)) return true;
+  }
+  return false;
+}
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -235,21 +250,89 @@ export interface MoveMessageParams {
   targetFolder: string;
 }
 
-export async function moveMessage(params: MoveMessageParams): Promise<void> {
+export interface MoveMessageResult {
+  operationId: string | null;
+}
+
+async function executeLoggedMove(
+  client: ImapFlow,
+  args: { sourcePath: string; uid: number; destPath: string; undoOf?: string },
+): Promise<{ operationId: string }> {
+  const lock = await client.getMailboxLock(args.sourcePath);
+  let operationId: string;
+  try {
+    const meta = await client.fetchOne(String(args.uid), { envelope: true }, { uid: true });
+    const envelope = meta ? meta.envelope : undefined;
+    const identity: MoveIdentity = {
+      messageId: envelope?.messageId ?? null,
+      date: envelope?.date ? envelope.date.toISOString() : null,
+      subject: envelope?.subject ?? null,
+    };
+    const sourceUidValidity = client.mailbox !== false ? client.mailbox.uidValidity : 0n;
+    operationId = await createPendingOperation({
+      sourcePath: args.sourcePath,
+      sourceUid: args.uid,
+      sourceUidValidity,
+      destPath: args.destPath,
+      identity,
+      undoOf: args.undoOf,
+    });
+  } finally {
+    lock.release();
+  }
+
+  const lock2 = await client.getMailboxLock(args.sourcePath);
+  try {
+    let moveResult;
+    try {
+      moveResult = await client.messageMove(String(args.uid), args.destPath, { uid: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (isUncertainMoveError(error)) {
+        await markUncertain(operationId, message);
+      } else {
+        await markFailed(operationId, message);
+      }
+      throw error;
+    }
+    if (!moveResult || moveResult.uidMap === undefined || moveResult.uidValidity === undefined) {
+      await markUncertain(
+        operationId,
+        'Server did not confirm the move with a destination UID (no UIDPLUS support detected).',
+      );
+      throw new Error(
+        `Move of message uid ${args.uid} to "${args.destPath}" could not be confirmed: the server did not report UIDPLUS details. The operation is recorded as uncertain.`,
+      );
+    }
+    const destUid = moveResult.uidMap.get(args.uid);
+    if (destUid === undefined) {
+      await markUncertain(operationId, 'Server did not report a destination UID for this message.');
+      throw new Error(
+        `Move of message uid ${args.uid} to "${args.destPath}" could not be confirmed: no destination UID was returned. The operation is recorded as uncertain.`,
+      );
+    }
+    await markConfirmed(operationId, { destUid, destUidValidity: moveResult.uidValidity });
+    return { operationId };
+  } finally {
+    lock2.release();
+  }
+}
+
+export async function moveMessage(params: MoveMessageParams): Promise<MoveMessageResult> {
   const client = getClient();
   await client.connect();
   try {
     const mailboxes = await client.list();
     assertMoveAllowed(mailboxes, params.folder, params.targetFolder);
     if (params.folder === params.targetFolder) {
-      return; // explicit no-op
+      return { operationId: null }; // explicit no-op, nothing to log or undo
     }
-    const lock = await client.getMailboxLock(params.folder);
-    try {
-      await client.messageMove(String(params.uid), params.targetFolder, { uid: true });
-    } finally {
-      lock.release();
-    }
+    const { operationId } = await executeLoggedMove(client, {
+      sourcePath: params.folder,
+      uid: params.uid,
+      destPath: params.targetFolder,
+    });
+    return { operationId };
   } finally {
     await client.logout();
   }

@@ -111,7 +111,7 @@ export function registerMailTools(server: McpServer): void {
     {
       title: 'Move Message',
       description:
-        'Moves a message from one folder to another. Moving into Trash or Junk is blocked by default and enforced by the server (not by this description) — there is no parameter to override it. Moving a message out of Trash or Junk is always allowed.',
+        'Moves a message from one folder to another. Moving into Trash or Junk is blocked by default and enforced by the server (not by this description) — there is no parameter to override it. Moving a message out of Trash or Junk is always allowed. On success, returns an operation_id that can be passed to undo_move within 7 days to reverse the move.',
       inputSchema: {
         folder: z.string().describe('Current folder path'),
         uid: z.number().int().describe('Message UID'),
@@ -120,8 +120,16 @@ export function registerMailTools(server: McpServer): void {
     },
     async (args) => {
       try {
-        await moveMessage({ folder: args.folder, uid: args.uid, targetFolder: args.target_folder });
-        return toResult({ ok: true });
+        const { operationId } = await moveMessage({
+          folder: args.folder,
+          uid: args.uid,
+          targetFolder: args.target_folder,
+        });
+        return toResult(
+          operationId
+            ? { ok: true, operation_id: operationId, undoable_for_days: 7 }
+            : { ok: true, note: 'Source and destination were the same folder; no move was performed.' },
+        );
       } catch (error) {
         return toErrorResult(error);
       }
