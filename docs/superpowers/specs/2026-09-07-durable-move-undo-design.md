@@ -24,7 +24,7 @@ The user has chosen Upstash (Redis, accessed via the `@upstash/redis` REST-based
 
 Stored in Upstash Redis via `@upstash/redis`.
 
-**`move:op:<operationId>`** — a Redis hash, one per move operation, with fields:
+**`move:op:<operationId>`** — a single JSON string value per move operation (via `SET`/`GET`), not a Redis hash: the whole record is always read and written together, so a JSON blob is simpler with `@upstash/redis` than mapping every field to `HSET`. Fields:
 
 | field | meaning |
 |---|---|
@@ -40,7 +40,7 @@ Stored in Upstash Redis via `@upstash/redis`.
 
 TTL: 7 days from `createdAt`, applied via `EXPIRE` right after the initial write.
 
-**`move:by-time`** — a sorted set; `ZADD` with score = `createdAt`, member = `operationId`. Used for reverse-chronological listing. A listing read that finds a member whose hash has expired removes that stale member (`ZREM`) and skips it.
+**`move:by-time`** — a sorted set; `ZADD` with score = `createdAt`, member = `operationId`. Used for reverse-chronological listing. A listing read that finds a member whose record has expired removes that stale member (`ZREM`) and skips it.
 
 **`move:lock:<operationId>`** — a short-TTL (30s) lock key, `SET ... NX EX 30`, used to serialize concurrent `undo_move` calls on the same operation.
 
@@ -48,7 +48,7 @@ TTL: 7 days from `createdAt`, applied via `EXPIRE` right after the initial write
 
 **`lib/moveLog.ts`** (new) — owns the Redis client and schema:
 - `getRedis()` — constructs `@upstash/redis`'s `Redis` client from `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`.
-- `createPendingOperation(params)` → writes the initial hash + sorted-set entry + TTL, returns `operationId`.
+- `createPendingOperation(params)` → writes the initial record + sorted-set entry + TTL, returns `operationId`.
 - `markConfirmed(operationId, { destUid, destUidValidity })`.
 - `markFailed(operationId, error)` / `markUncertain(operationId, error)`.
 - `markUndone(operationId, undoneByOperationId)`.
