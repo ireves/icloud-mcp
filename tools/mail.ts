@@ -110,7 +110,8 @@ export function registerMailTools(server: McpServer): void {
     'move_message',
     {
       title: 'Move Message',
-      description: 'Moves a message from one folder to another.',
+      description:
+        'Moves a message from one folder to another. Moving into Trash or Junk is blocked by default and enforced by the server (not by this description) — there is no parameter to override it. Moving a message out of Trash or Junk is always allowed.',
       inputSchema: {
         folder: z.string().describe('Current folder path'),
         uid: z.number().int().describe('Message UID'),
