@@ -21,6 +21,8 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 | `ICLOUD_EMAIL` | Your iCloud email address |
 | `ICLOUD_APP_PASSWORD` | The app-specific password from step 1 |
 | `MCP_AUTH_TOKEN` | A shared secret this server requires in the `Authorization: Bearer` header. Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
+| `UPSTASH_REDIS_REST_URL` | REST URL for the Upstash Redis database used to track moves for undo. Set automatically when you connect the Upstash integration to this project in Vercel. |
+| `UPSTASH_REDIS_REST_TOKEN` | REST token for the same Upstash database. Also set automatically by the Vercel integration. |
 
 See `.env.example` for local development — copy it to `.env` and fill in real values (never commit `.env`).
 
