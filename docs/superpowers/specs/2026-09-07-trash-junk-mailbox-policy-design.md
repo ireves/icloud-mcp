@@ -82,8 +82,11 @@ export function assertMoveAllowed(
     throw new Error(`Target folder "${targetPath}" does not exist.`);
   }
   if (!isProhibitedDestination(target)) return;
-  const source = resolveMailbox(mailboxes, sourcePath);
-  if (source && isProhibitedDestination(source)) return; // recovery move: allowed
+  // No separate "recovery" exception is needed here: a recovery move (out of
+  // Trash/Junk into an ordinary folder) already returns above, since its
+  // target isn't prohibited. Reaching this point means the target itself is
+  // Trash or Junk, regardless of where the message is coming from — including
+  // a Trash-to-Junk move, which is not a recovery and must stay blocked.
   if (process.env.ALLOW_TRASH_JUNK_MOVES === 'true') return; // explicit operator override
   throw new Error(
     `Moving messages into "${targetPath}" is blocked by default because it is a Trash or Junk folder. ` +
