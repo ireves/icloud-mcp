@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json",
     "test:imap": "tsx scripts/test-imap.ts",
     "test:caldav": "tsx scripts/test-caldav.ts"
   },
