@@ -70,7 +70,7 @@ export function registerMailTools(server: McpServer): void {
     {
       title: 'Get Mail Message',
       description:
-        'Returns full headers and body for one message. HTML-only messages are converted to readable plain text.',
+        'Returns full headers and body for one message. HTML-only messages are converted to readable plain text. Rejects messages over 10MB, and truncates very long bodies.',
       inputSchema: {
         folder: z.string().describe('Folder path, e.g. "INBOX"'),
         uid: z.number().int().describe('Message UID, from list_messages'),

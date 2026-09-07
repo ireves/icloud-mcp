@@ -84,7 +84,7 @@ export function registerReminderTools(server: McpServer): void {
       inputSchema: {
         list_id: z.string().describe('Reminder list identifier to create the reminder in'),
         title: z.string().describe('Reminder title'),
-        due_date: z.string().optional().describe('ISO 8601 due date'),
+        due_date: z.string().optional().describe('ISO 8601 due date with an explicit "Z" or timezone offset'),
         notes: z.string().optional().describe('Reminder notes'),
       },
     },

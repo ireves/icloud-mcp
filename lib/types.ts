@@ -31,6 +31,7 @@ export interface EventSummary {
   end: string;
   location?: string;
   hasAttendees: boolean;
+  isRecurring: boolean;
 }
 
 export interface EventDetail extends EventSummary {

@@ -36,8 +36,8 @@ export function registerCalendarTools(server: McpServer): void {
         'Lists event summaries (title, start/end, location, whether it has attendees) in a calendar within a date range.',
       inputSchema: {
         calendar_id: z.string().describe('Calendar identifier, from list_calendars'),
-        start_date: z.string().describe('ISO 8601 start of the date range'),
-        end_date: z.string().describe('ISO 8601 end of the date range'),
+        start_date: z.string().describe('ISO 8601 start of the date range, with an explicit "Z" or timezone offset'),
+        end_date: z.string().describe('ISO 8601 end of the date range, with an explicit "Z" or timezone offset'),
       },
     },
     async (args) => {
@@ -82,8 +82,8 @@ export function registerCalendarTools(server: McpServer): void {
       inputSchema: {
         calendar_id: z.string().describe('Calendar identifier to create the event in'),
         title: z.string().describe('Event title'),
-        start_time: z.string().describe('ISO 8601 start time'),
-        end_time: z.string().describe('ISO 8601 end time'),
+        start_time: z.string().describe('ISO 8601 start time with an explicit "Z" or timezone offset'),
+        end_time: z.string().describe('ISO 8601 end time with an explicit "Z" or timezone offset'),
         location: z.string().optional().describe('Event location'),
         notes: z.string().optional().describe('Event notes/description'),
       },
@@ -110,13 +110,13 @@ export function registerCalendarTools(server: McpServer): void {
     {
       title: 'Update Event',
       description:
-        'Updates fields on an existing event. Only include the fields that are changing. Never adds attendees or sends invitations.',
+        'Updates fields on an existing event. Only include the fields that are changing. Never adds attendees or sends invitations. Rejects events that already have attendees/an organizer (to avoid triggering meeting-update notifications) and events that are part of a recurring series (not yet supported).',
       inputSchema: {
         calendar_id: z.string().describe('Calendar identifier'),
         event_id: z.string().describe('Event identifier, from list_events'),
         title: z.string().optional().describe('New title'),
-        start_time: z.string().optional().describe('New ISO 8601 start time'),
-        end_time: z.string().optional().describe('New ISO 8601 end time'),
+        start_time: z.string().optional().describe('New ISO 8601 date-time with an explicit "Z" or timezone offset'),
+        end_time: z.string().optional().describe('New ISO 8601 date-time with an explicit "Z" or timezone offset'),
         location: z.string().optional().describe('New location'),
         notes: z.string().optional().describe('New notes/description'),
       },

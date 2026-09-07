@@ -19,6 +19,47 @@ function requireEnv(name: string): string {
   return value;
 }
 
+// tsdav's fetchCalendarObjects defaults to a VEVENT comp-filter when no
+// explicit filter is given, which silently excludes VTODOs from a reminder
+// list. Reminder calls must always pass this filter explicitly.
+const VTODO_FILTERS = [
+  {
+    'comp-filter': {
+      _attributes: { name: 'VCALENDAR' },
+      'comp-filter': {
+        _attributes: { name: 'VTODO' },
+      },
+    },
+  },
+];
+
+function parseRequiredDateTime(value: string, fieldName: string): Date {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(value)) {
+    throw new Error(
+      `${fieldName} must be an ISO 8601 date-time with an explicit UTC "Z" or timezone offset, got: "${value}"`,
+    );
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new Error(`${fieldName} is not a valid date: "${value}"`);
+  }
+  return date;
+}
+
+function assertStartBeforeEnd(start: Date, end: Date): void {
+  if (start.getTime() >= end.getTime()) {
+    throw new Error(`start_time (${start.toISOString()}) must be before end_time (${end.toISOString()})`);
+  }
+}
+
+function isSchedulingObject(vevent: ICAL.Component): boolean {
+  return vevent.getAllProperties('attendee').length > 0 || Boolean(vevent.getFirstProperty('organizer'));
+}
+
+function isRecurringVevent(vevent: ICAL.Component): boolean {
+  return Boolean(vevent.getFirstProperty('rrule')) || Boolean(vevent.getFirstProperty('recurrence-id'));
+}
+
 let cachedClient: DAVClient | null = null;
 
 async function getClient(): Promise<DAVClient> {
@@ -76,20 +117,37 @@ export async function listReminderLists(): Promise<ReminderListInfo[]> {
 
 // --- Events ---
 
-function parseEventObject(obj: { url: string; data: string }): EventSummary | null {
-  const jcal = ICAL.parse(obj.data);
-  const comp = new ICAL.Component(jcal);
-  const vevent = comp.getFirstSubcomponent('vevent');
-  if (!vevent) return null;
+function summarizeVevent(vevent: ICAL.Component, id: string): EventSummary {
   const event = new ICAL.Event(vevent);
   return {
-    id: obj.url,
+    id,
     title: event.summary ?? '(untitled)',
     start: event.startDate ? event.startDate.toJSDate().toISOString() : '',
     end: event.endDate ? event.endDate.toJSDate().toISOString() : '',
     location: (vevent.getFirstPropertyValue('location') as string | null) ?? undefined,
     hasAttendees: vevent.getAllProperties('attendee').length > 0,
+    isRecurring: isRecurringVevent(vevent),
   };
+}
+
+// Returns one summary per VEVENT component in the object. A non-recurring
+// object has exactly one; a server-expanded recurring object (see listEvents'
+// use of `expand`) has one per occurrence within the requested range.
+function parseEventObjects(obj: { url: string; data: string }): EventSummary[] {
+  const jcal = ICAL.parse(obj.data);
+  const comp = new ICAL.Component(jcal);
+  const vevents = comp.getAllSubcomponents('vevent');
+  return vevents.map((vevent, index) =>
+    summarizeVevent(vevent, vevents.length > 1 ? `${obj.url}#${index}` : obj.url),
+  );
+}
+
+function parseEventObject(obj: { url: string; data: string }): EventSummary | null {
+  const jcal = ICAL.parse(obj.data);
+  const comp = new ICAL.Component(jcal);
+  const vevent = comp.getFirstSubcomponent('vevent');
+  if (!vevent) return null;
+  return summarizeVevent(vevent, obj.url);
 }
 
 export interface ListEventsParams {
@@ -101,16 +159,20 @@ export interface ListEventsParams {
 export async function listEvents(params: ListEventsParams): Promise<EventSummary[]> {
   const client = await getClient();
   const calendar = await findCalendar(params.calendarId);
+  const startDate = parseRequiredDateTime(params.startDate, 'start_date');
+  const endDate = parseRequiredDateTime(params.endDate, 'end_date');
   const objects = await client.fetchCalendarObjects({
     calendar,
     timeRange: {
-      start: new Date(params.startDate).toISOString(),
-      end: new Date(params.endDate).toISOString(),
+      start: startDate.toISOString(),
+      end: endDate.toISOString(),
     },
+    // Ask the server to expand recurring events into individual occurrences
+    // within the range, instead of returning only the recurring master
+    // (whose own dates may fall outside the requested window entirely).
+    expand: true,
   });
-  return objects
-    .map((obj) => parseEventObject({ url: obj.url, data: obj.data ?? '' }))
-    .filter((e): e is EventSummary => e !== null);
+  return objects.flatMap((obj) => parseEventObjects({ url: obj.url, data: obj.data ?? '' }));
 }
 
 export interface GetEventParams {
@@ -118,10 +180,17 @@ export interface GetEventParams {
   eventId: string;
 }
 
+// list_events may return an occurrence id like "<url>#2" for an expanded
+// recurring event. Fetching the object itself always uses the base URL.
+function baseObjectUrl(id: string): string {
+  const hashIndex = id.indexOf('#');
+  return hashIndex === -1 ? id : id.slice(0, hashIndex);
+}
+
 export async function getEvent(params: GetEventParams): Promise<EventDetail> {
   const client = await getClient();
   const calendar = await findCalendar(params.calendarId);
-  const objects = await client.fetchCalendarObjects({ calendar, objectUrls: [params.eventId] });
+  const objects = await client.fetchCalendarObjects({ calendar, objectUrls: [baseObjectUrl(params.eventId)] });
   const obj = objects[0];
   if (!obj || !obj.data) {
     throw new Error(`Event ${params.eventId} not found in calendar ${params.calendarId}`);
@@ -153,6 +222,9 @@ export interface CreateEventParams {
 export async function createEvent(params: CreateEventParams): Promise<{ id: string }> {
   const client = await getClient();
   const calendar = await findCalendar(params.calendarId);
+  const startTime = parseRequiredDateTime(params.startTime, 'start_time');
+  const endTime = parseRequiredDateTime(params.endTime, 'end_time');
+  assertStartBeforeEnd(startTime, endTime);
   const uid = newUid();
   const filename = `${uid}.ics`;
 
@@ -162,8 +234,8 @@ export async function createEvent(params: CreateEventParams): Promise<{ id: stri
   const vevent = new ICAL.Component('vevent');
   vevent.updatePropertyWithValue('uid', uid);
   vevent.updatePropertyWithValue('summary', params.title);
-  vevent.updatePropertyWithValue('dtstart', ICAL.Time.fromJSDate(new Date(params.startTime), true));
-  vevent.updatePropertyWithValue('dtend', ICAL.Time.fromJSDate(new Date(params.endTime), true));
+  vevent.updatePropertyWithValue('dtstart', ICAL.Time.fromJSDate(startTime, true));
+  vevent.updatePropertyWithValue('dtend', ICAL.Time.fromJSDate(endTime, true));
   vevent.updatePropertyWithValue('dtstamp', ICAL.Time.now());
   if (params.location) vevent.updatePropertyWithValue('location', params.location);
   if (params.notes) vevent.updatePropertyWithValue('description', params.notes);
@@ -193,7 +265,8 @@ export interface UpdateEventParams {
 export async function updateEvent(params: UpdateEventParams): Promise<void> {
   const client = await getClient();
   const calendar = await findCalendar(params.calendarId);
-  const objects = await client.fetchCalendarObjects({ calendar, objectUrls: [params.eventId] });
+  const baseUrl = baseObjectUrl(params.eventId);
+  const objects = await client.fetchCalendarObjects({ calendar, objectUrls: [baseUrl] });
   const obj = objects[0];
   if (!obj || !obj.data) {
     throw new Error(`Event ${params.eventId} not found in calendar ${params.calendarId}`);
@@ -204,12 +277,35 @@ export async function updateEvent(params: UpdateEventParams): Promise<void> {
   if (!vevent) {
     throw new Error(`Event ${params.eventId} has no VEVENT body`);
   }
-  if (params.title !== undefined) vevent.updatePropertyWithValue('summary', params.title);
-  if (params.startTime !== undefined) {
-    vevent.updatePropertyWithValue('dtstart', ICAL.Time.fromJSDate(new Date(params.startTime), true));
+  if (isSchedulingObject(vevent)) {
+    throw new Error(
+      `Event ${params.eventId} has attendees or an organizer. Updating a scheduling object can trigger CalDAV meeting-update notifications to those attendees, which this tool never does — edit it directly in Calendar.app instead.`,
+    );
   }
-  if (params.endTime !== undefined) {
-    vevent.updatePropertyWithValue('dtend', ICAL.Time.fromJSDate(new Date(params.endTime), true));
+  if (isRecurringVevent(vevent)) {
+    throw new Error(
+      `Event ${params.eventId} is part of a recurring series. Editing a single occurrence or the whole series is not yet supported — edit it directly in Calendar.app instead.`,
+    );
+  }
+
+  const currentStart = vevent.getFirstPropertyValue('dtstart') as ICAL.Time | null;
+  const currentEnd = vevent.getFirstPropertyValue('dtend') as ICAL.Time | null;
+  const newStart = params.startTime !== undefined
+    ? parseRequiredDateTime(params.startTime, 'start_time')
+    : (currentStart?.toJSDate() ?? null);
+  const newEnd = params.endTime !== undefined
+    ? parseRequiredDateTime(params.endTime, 'end_time')
+    : (currentEnd?.toJSDate() ?? null);
+  if (newStart && newEnd) {
+    assertStartBeforeEnd(newStart, newEnd);
+  }
+
+  if (params.title !== undefined) vevent.updatePropertyWithValue('summary', params.title);
+  if (params.startTime !== undefined && newStart) {
+    vevent.updatePropertyWithValue('dtstart', ICAL.Time.fromJSDate(newStart, true));
+  }
+  if (params.endTime !== undefined && newEnd) {
+    vevent.updatePropertyWithValue('dtend', ICAL.Time.fromJSDate(newEnd, true));
   }
   if (params.location !== undefined) vevent.updatePropertyWithValue('location', params.location);
   if (params.notes !== undefined) vevent.updatePropertyWithValue('description', params.notes);
@@ -247,7 +343,7 @@ export interface ListRemindersParams {
 export async function listReminders(params: ListRemindersParams): Promise<ReminderSummary[]> {
   const client = await getClient();
   const calendar = await findCalendar(params.listId);
-  const objects = await client.fetchCalendarObjects({ calendar });
+  const objects = await client.fetchCalendarObjects({ calendar, filters: VTODO_FILTERS });
   const reminders = objects
     .map((obj) => parseTodoObject({ url: obj.url, data: obj.data ?? '' }))
     .filter((r): r is ReminderSummary => r !== null);
@@ -299,7 +395,9 @@ export async function createReminder(params: CreateReminderParams): Promise<{ id
   vtodo.updatePropertyWithValue('summary', params.title);
   vtodo.updatePropertyWithValue('dtstamp', ICAL.Time.now());
   vtodo.updatePropertyWithValue('status', 'NEEDS-ACTION');
-  if (params.dueDate) vtodo.updatePropertyWithValue('due', ICAL.Time.fromJSDate(new Date(params.dueDate), true));
+  if (params.dueDate) {
+    vtodo.updatePropertyWithValue('due', ICAL.Time.fromJSDate(parseRequiredDateTime(params.dueDate, 'due_date'), true));
+  }
   if (params.notes) vtodo.updatePropertyWithValue('description', params.notes);
   vcalendar.addSubcomponent(vtodo);
 

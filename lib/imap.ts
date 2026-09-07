@@ -23,12 +23,24 @@ function getClient(): ImapFlow {
   });
 }
 
+const MAX_MESSAGE_BYTES = 10 * 1024 * 1024;
+const MAX_BODY_CHARS = 100_000;
+
 async function extractBody(source: Buffer | undefined): Promise<string> {
   if (!source) return '';
   const parsed = await simpleParser(source);
-  if (parsed.text) return parsed.text;
-  if (parsed.html) return convert(parsed.html, { wordwrap: 100 });
-  return '';
+  let body: string;
+  if (parsed.text) {
+    body = parsed.text;
+  } else if (parsed.html) {
+    body = convert(parsed.html, { wordwrap: 100 });
+  } else {
+    return '';
+  }
+  if (body.length > MAX_BODY_CHARS) {
+    return `${body.slice(0, MAX_BODY_CHARS)}\n\n[... truncated, message body exceeds ${MAX_BODY_CHARS} characters]`;
+  }
+  return body;
 }
 
 export async function listFolders(): Promise<MailboxInfo[]> {
@@ -101,6 +113,18 @@ export async function getMessage(params: GetMessageParams): Promise<MessageDetai
   try {
     const lock = await client.getMailboxLock(params.folder);
     try {
+      // Check size before downloading the full source, so an oversized
+      // message never gets pulled into memory just to be rejected.
+      const meta = await client.fetchOne(String(params.uid), { size: true }, { uid: true });
+      if (!meta) {
+        throw new Error(`Message uid ${params.uid} not found in folder ${params.folder}`);
+      }
+      if (meta.size !== undefined && meta.size > MAX_MESSAGE_BYTES) {
+        throw new Error(
+          `Message uid ${params.uid} is ${Math.round(meta.size / 1024 / 1024)}MB, exceeding the ${MAX_MESSAGE_BYTES / 1024 / 1024}MB limit for get_message. Open it in a mail client instead.`,
+        );
+      }
+
       const message = await client.fetchOne(
         String(params.uid),
         { envelope: true, flags: true, source: true },
