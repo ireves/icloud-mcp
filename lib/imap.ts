@@ -11,6 +11,59 @@ function requireEnv(name: string): string {
   return value;
 }
 
+export interface MailboxListEntry {
+  path: string;
+  name: string;
+  specialUse?: string;
+}
+
+function resolveMailbox(mailboxes: MailboxListEntry[], path: string): MailboxListEntry | null {
+  return mailboxes.find((m) => m.path === path) ?? null;
+}
+
+// A short, iCloud-specific safety net for the case where the server doesn't
+// report SPECIAL-USE for some account. Exact match only — a substring rule
+// would wrongly catch an ordinary folder like "Junk Research".
+const TRASH_JUNK_NAME_FALLBACK = new Set([
+  'Trash',
+  'Deleted Messages',
+  'Papierkorb',
+  'Corbeille',
+  'Junk',
+  'Junk E-mail',
+  'Indésirables',
+]);
+
+function isProhibitedDestination(mailbox: MailboxListEntry): boolean {
+  if (mailbox.specialUse === '\\Trash' || mailbox.specialUse === '\\Junk') return true;
+  if (mailbox.specialUse) return false; // has a different, known special-use — trust it
+  return TRASH_JUNK_NAME_FALLBACK.has(mailbox.name);
+}
+
+export function assertMoveAllowed(
+  mailboxes: MailboxListEntry[],
+  sourcePath: string,
+  targetPath: string,
+): void {
+  if (sourcePath === targetPath) return; // no-op, nothing to validate
+  const target = resolveMailbox(mailboxes, targetPath);
+  if (!target) {
+    throw new Error(`Target folder "${targetPath}" does not exist.`);
+  }
+  if (!isProhibitedDestination(target)) return;
+  // No separate "recovery" exception is needed here: a recovery move (out of
+  // Trash/Junk into an ordinary folder) already returns above, since its
+  // target isn't prohibited. Reaching this point means the target itself is
+  // Trash or Junk, regardless of where the message is coming from — including
+  // a Trash-to-Junk move, which is not a recovery and must stay blocked.
+  if (process.env.ALLOW_TRASH_JUNK_MOVES === 'true') return; // explicit operator override
+  throw new Error(
+    `Moving messages into "${targetPath}" is blocked by default because it is a Trash or Junk folder. ` +
+      `This restriction is enforced by the server, not the agent, and has no per-call override. ` +
+      `An operator can lift it by setting ALLOW_TRASH_JUNK_MOVES=true in the deployment's environment.`,
+  );
+}
+
 function getClient(): ImapFlow {
   const email = requireEnv('ICLOUD_EMAIL');
   const password = requireEnv('ICLOUD_APP_PASSWORD');
