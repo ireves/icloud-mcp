@@ -301,3 +301,89 @@ describe('listEvents occurrence identifiers and bounds', () => {
     ).rejects.toThrow(/must be before/);
   });
 });
+
+describe('getEvent occurrence resolution', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockClient.fetchCalendars.mockResolvedValue([TEST_CALENDAR]);
+  });
+
+  it('resolves an overridden (moved) occurrence via direct fetch, matching what list_events would show', async () => {
+    const caldav = await freshCaldav();
+    const objUrl = `${TEST_CALENDAR.url}m1.ics`;
+    const ics = wrapCalendar([
+      buildVevent({ uid: 'm1', summary: 'Master (January)', dtstart: '20260112T100000Z', dtend: '20260112T110000Z', rrule: 'FREQ=WEEKLY;COUNT=40' }),
+      buildVevent({
+        uid: 'm1',
+        summary: 'Moved occurrence',
+        dtstart: '20260915T140000Z',
+        dtend: '20260915T150000Z',
+        recurrenceId: '20260914T100000Z',
+        location: 'Room 2',
+        description: 'Moved a day and an hour later',
+      }),
+    ]);
+    mockClient.fetchCalendarObjects.mockResolvedValue([{ url: objUrl, etag: 'e', data: ics }]);
+
+    const event = await caldav.getEvent({ calendarId: TEST_CALENDAR.url, eventId: `${objUrl}#2026-09-14T10:00:00.000Z` });
+
+    expect(event.title).toBe('Moved occurrence');
+    expect(event.start).toBe('2026-09-15T14:00:00.000Z');
+    expect(event.location).toBe('Room 2');
+    expect(event.notes).toBe('Moved a day and an hour later');
+    // Only the direct (non-expand) fetch should have been needed.
+    expect(mockClient.fetchCalendarObjects).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves a non-overridden virtual occurrence via the expand fallback', async () => {
+    const caldav = await freshCaldav();
+    const objUrl = `${TEST_CALENDAR.url}v1.ics`;
+    const masterOnly = wrapCalendar([
+      buildVevent({ uid: 'v1', summary: 'Master', dtstart: '20260112T100000Z', dtend: '20260112T110000Z', rrule: 'FREQ=WEEKLY;COUNT=40' }),
+    ]);
+    const expandedInstance = wrapCalendar([
+      buildVevent({ uid: 'v1', summary: 'Master', dtstart: '20260914T100000Z', dtend: '20260914T110000Z', recurrenceId: '20260914T100000Z' }),
+    ]);
+    mockClient.fetchCalendarObjects
+      .mockResolvedValueOnce([{ url: objUrl, etag: 'e', data: masterOnly }]) // direct fetch: no override present
+      .mockResolvedValueOnce([{ url: objUrl, etag: 'e', data: expandedInstance }]); // expand fallback
+
+    const event = await caldav.getEvent({ calendarId: TEST_CALENDAR.url, eventId: `${objUrl}#2026-09-14T10:00:00.000Z` });
+
+    expect(event.start).toBe('2026-09-14T10:00:00.000Z');
+    expect(mockClient.fetchCalendarObjects).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws an explicit error for an excluded (EXDATE) occurrence, never falling back to the master', async () => {
+    const caldav = await freshCaldav();
+    const objUrl = `${TEST_CALENDAR.url}x1.ics`;
+    const masterOnly = wrapCalendar([
+      buildVevent({ uid: 'x1', summary: 'Master', dtstart: '20260112T100000Z', dtend: '20260112T110000Z', rrule: 'FREQ=WEEKLY;COUNT=40' }),
+    ]);
+    mockClient.fetchCalendarObjects
+      .mockResolvedValueOnce([{ url: objUrl, etag: 'e', data: masterOnly }])
+      .mockResolvedValueOnce([]); // excluded: expand returns nothing for this instant
+
+    await expect(
+      caldav.getEvent({ calendarId: TEST_CALENDAR.url, eventId: `${objUrl}#2026-09-14T10:00:00.000Z` }),
+    ).rejects.toThrow(/could not be resolved/);
+  });
+
+  it('rejects a legacy positional identifier with an explicit error', async () => {
+    const caldav = await freshCaldav();
+    await expect(
+      caldav.getEvent({ calendarId: TEST_CALENDAR.url, eventId: `${TEST_CALENDAR.url}legacy.ics#2` }),
+    ).rejects.toThrow(/deprecated format/);
+    expect(mockClient.fetchCalendarObjects).not.toHaveBeenCalled();
+  });
+
+  it('still resolves a plain (non-recurring) event by URL with no suffix', async () => {
+    const caldav = await freshCaldav();
+    const ics = wrapCalendar([buildVevent({ uid: 'p2', summary: 'Plain', dtstart: '20260914T100000Z', dtend: '20260914T110000Z' })]);
+    mockClient.fetchCalendarObjects.mockResolvedValue([{ url: `${TEST_CALENDAR.url}p2.ics`, etag: 'e', data: ics }]);
+
+    const event = await caldav.getEvent({ calendarId: TEST_CALENDAR.url, eventId: `${TEST_CALENDAR.url}p2.ics` });
+
+    expect(event.title).toBe('Plain');
+  });
+});

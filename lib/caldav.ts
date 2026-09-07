@@ -261,23 +261,91 @@ function baseObjectUrl(id: string): string {
   return hashIndex === -1 ? id : id.slice(0, hashIndex);
 }
 
+function isIsoDateTime(value: string): boolean {
+  try {
+    parseRequiredDateTime(value, '_');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function findVeventByRecurrenceId(icsData: string, recurrenceIdIsoTarget: string): ICAL.Component | null {
+  const jcal = ICAL.parse(icsData);
+  const comp = new ICAL.Component(jcal);
+  return (
+    comp
+      .getAllSubcomponents('vevent')
+      .filter((v) => !isCancelledVevent(v))
+      .find((v) => recurrenceIdIso(v) === recurrenceIdIsoTarget) ?? null
+  );
+}
+
+function eventDetailFromVevent(vevent: ICAL.Component, id: string): EventDetail {
+  const summary = summarizeVevent(vevent, id);
+  const notes = (vevent.getFirstPropertyValue('description') as string | null) ?? undefined;
+  return { ...summary, notes };
+}
+
 export async function getEvent(params: GetEventParams): Promise<EventDetail> {
   const client = await getClient();
   const calendar = await findCalendar(params.calendarId);
-  const objects = await client.fetchCalendarObjects({ calendar, objectUrls: [baseObjectUrl(params.eventId)] });
-  const obj = objects[0];
-  if (!obj || !obj.data) {
-    throw new Error(`Event ${params.eventId} not found in calendar ${params.calendarId}`);
+  const hashIndex = params.eventId.indexOf('#');
+
+  if (hashIndex === -1) {
+    const objects = await client.fetchCalendarObjects({ calendar, objectUrls: [params.eventId] });
+    const obj = objects[0];
+    if (!obj || !obj.data) {
+      throw new Error(`Event ${params.eventId} not found in calendar ${params.calendarId}`);
+    }
+    const summary = parseEventObject({ url: obj.url, data: obj.data });
+    if (!summary) {
+      throw new Error(`Event ${params.eventId} could not be parsed as a VEVENT`);
+    }
+    const jcal = ICAL.parse(obj.data);
+    const comp = new ICAL.Component(jcal);
+    const vevent = comp.getFirstSubcomponent('vevent');
+    const notes = (vevent?.getFirstPropertyValue('description') as string | null) ?? undefined;
+    return { ...summary, notes };
   }
-  const summary = parseEventObject({ url: obj.url, data: obj.data });
-  if (!summary) {
-    throw new Error(`Event ${params.eventId} could not be parsed as a VEVENT`);
+
+  const baseUrl = params.eventId.slice(0, hashIndex);
+  const recurrenceIdRaw = params.eventId.slice(hashIndex + 1);
+  if (!isIsoDateTime(recurrenceIdRaw)) {
+    throw new Error(
+      `Event identifier "${params.eventId}" uses a deprecated format; call list_events again to get a current identifier.`,
+    );
   }
-  const jcal = ICAL.parse(obj.data);
-  const comp = new ICAL.Component(jcal);
-  const vevent = comp.getFirstSubcomponent('vevent');
-  const notes = (vevent?.getFirstPropertyValue('description') as string | null) ?? undefined;
-  return { ...summary, notes };
+
+  // Step 1: an overridden/moved occurrence is stored as its own VEVENT
+  // component inside the object itself, at its real current time — a direct
+  // fetch finds it correctly regardless of where it moved to. A CalDAV
+  // time-range query filters on the occurrence's *current* time, not its
+  // RECURRENCE-ID, so querying around the original slot would miss a move.
+  const directObjects = await client.fetchCalendarObjects({ calendar, objectUrls: [baseUrl] });
+  const directObj = directObjects[0];
+  if (directObj?.data) {
+    const match = findVeventByRecurrenceId(directObj.data, recurrenceIdRaw);
+    if (match) return eventDetailFromVevent(match, params.eventId);
+  }
+
+  // Step 2: no override component — a non-overridden ("virtual") instance
+  // that only materializes through server-side expansion, occurring by
+  // definition exactly at its RECURRENCE-ID time.
+  const target = new Date(recurrenceIdRaw);
+  const windowEnd = new Date(target.getTime() + 60_000);
+  const expanded = await client.fetchCalendarObjects({
+    calendar,
+    timeRange: { start: target.toISOString(), end: windowEnd.toISOString() },
+    expand: true,
+  });
+  for (const obj of expanded) {
+    if (!obj.data) continue;
+    const match = findVeventByRecurrenceId(obj.data, recurrenceIdRaw);
+    if (match) return eventDetailFromVevent(match, params.eventId);
+  }
+
+  throw new Error(`Occurrence ${params.eventId} could not be resolved — it may have been moved, cancelled, or excluded.`);
 }
 
 function newUid(): string {
