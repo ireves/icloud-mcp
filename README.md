@@ -60,8 +60,11 @@ Both read from a local `.env` file and print what they find. Run them separately
 | `list_messages` | List message headers in a folder (subject, sender, date, unread, UID) |
 | `get_message` | Get full headers and body for one message (HTML converted to plain text) |
 | `mark_message` | Mark a message read/unread |
-| `move_message` | Move a message to another folder (moves into Trash/Junk are blocked by default, server-enforced) |
+| `move_message` | Move a message to another folder (moves into Trash/Junk are blocked by default, server-enforced); returns an `operation_id` you can pass to `undo_move` |
 | `flag_message` | Flag/unflag a message |
+| `undo_move` | Reverse a previous `move_message` by its `operation_id`, with safety checks |
+| `list_move_operations` | List recent move operations, most recent first |
+| `get_move_operation` | Get the full record for one move operation |
 
 ### Calendar (CalDAV)
 
@@ -88,6 +91,12 @@ Both read from a local `.env` file and print what they find. Run them separately
 `move_message` blocks moves into any folder whose IMAP special-use metadata (or, as a fallback, exact folder name) identifies it as Trash or Junk. This is enforced in the server itself — there is no tool parameter that can override it, and no combination of agent instructions changes it. Moving a message *out of* Trash or Junk (recovery) is always allowed.
 
 To lift the restriction, an operator (not the agent) sets `ALLOW_TRASH_JUNK_MOVES=true` in the deployment's environment variables. Leave it unset for the default, safer behaviour.
+
+## Recovering from a move
+
+Every `move_message` call is durably logged in Upstash Redis for 7 days, independently of the mail server itself. `undo_move` reverses a logged move, but only after re-verifying that the message is still where it was left: it checks the destination folder's UIDVALIDITY hasn't changed and that the message's identity (Message-ID, date, and subject) still matches what was originally moved, before moving anything back. The same Trash/Junk destination policy applies to undo as to the original move.
+
+Use `list_move_operations` to see recent moves and their status, or `get_move_operation` with an `operation_id` to inspect one in detail. A move can be in one of five states: `pending` (in progress), `confirmed` (completed and undoable), `failed` (didn't happen — nothing to undo), `uncertain` (the mail server's response was ambiguous, so the outcome couldn't be confirmed), or `undone`. Calling `undo_move` on an `uncertain` operation automatically attempts to reconcile it first, by checking both the source and destination folders for the message; if that reconciliation is itself ambiguous, `undo_move` refuses and asks for manual verification rather than guessing.
 
 ## v1 scope
 
