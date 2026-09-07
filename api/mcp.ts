@@ -6,8 +6,6 @@ import { registerMailTools } from '../tools/mail.js';
 import { registerCalendarTools } from '../tools/calendar.js';
 import { registerReminderTools } from '../tools/reminders.js';
 
-export const config = { runtime: 'nodejs' };
-
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!isAuthorized(req.headers.authorization)) {
     res.status(401).json({ error: 'Unauthorized' });
