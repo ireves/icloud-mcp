@@ -183,16 +183,32 @@ function summarizeVevent(vevent: ICAL.Component, id: string): EventSummary {
   };
 }
 
-// Returns one summary per VEVENT component in the object. A non-recurring
-// object has exactly one; a server-expanded recurring object (see listEvents'
-// use of `expand`) has one per occurrence within the requested range.
+function isCancelledVevent(vevent: ICAL.Component): boolean {
+  const status = vevent.getFirstPropertyValue('status') as string | null;
+  return status === 'CANCELLED';
+}
+
+function recurrenceIdIso(vevent: ICAL.Component): string | null {
+  const recurrenceId = vevent.getFirstPropertyValue('recurrence-id') as ICAL.Time | null;
+  return recurrenceId ? recurrenceId.toJSDate().toISOString() : null;
+}
+
+const MAX_LIST_EVENTS_RANGE_DAYS = 366;
+
+// Returns one summary per (non-cancelled) VEVENT component in the object. A
+// non-recurring object has exactly one, with a plain `<url>` id. A
+// server-expanded recurring object (see listEvents' use of `expand`) has one
+// per occurrence within the requested range, each with a stable
+// `<url>#<RECURRENCE-ID>` id — re-derivable later regardless of list order.
 function parseEventObjects(obj: { url: string; data: string }): EventSummary[] {
   const jcal = ICAL.parse(obj.data);
   const comp = new ICAL.Component(jcal);
-  const vevents = comp.getAllSubcomponents('vevent');
-  return vevents.map((vevent, index) =>
-    summarizeVevent(vevent, vevents.length > 1 ? `${obj.url}#${index}` : obj.url),
-  );
+  const vevents = comp.getAllSubcomponents('vevent').filter((v) => !isCancelledVevent(v));
+  return vevents.map((vevent) => {
+    const recId = recurrenceIdIso(vevent);
+    const id = recId ? `${obj.url}#${recId}` : obj.url;
+    return summarizeVevent(vevent, id);
+  });
 }
 
 function parseEventObject(obj: { url: string; data: string }): EventSummary | null {
@@ -214,6 +230,11 @@ export async function listEvents(params: ListEventsParams): Promise<EventSummary
   const calendar = await findCalendar(params.calendarId);
   const startDate = parseRequiredDateTime(params.startDate, 'start_date');
   const endDate = parseRequiredDateTime(params.endDate, 'end_date');
+  assertStartBeforeEnd(startDate, endDate);
+  const rangeDays = (endDate.getTime() - startDate.getTime()) / (24 * 60 * 60 * 1000);
+  if (rangeDays > MAX_LIST_EVENTS_RANGE_DAYS) {
+    throw new Error(`Date range exceeds the ${MAX_LIST_EVENTS_RANGE_DAYS}-day maximum for list_events; narrow the range.`);
+  }
   const objects = await client.fetchCalendarObjects({
     calendar,
     timeRange: {

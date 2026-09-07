@@ -220,3 +220,84 @@ describe('updateEvent safeguards', () => {
     expect(dtstartLine).not.toContain('TZID');
   });
 });
+
+describe('listEvents occurrence identifiers and bounds', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockClient.fetchCalendars.mockResolvedValue([TEST_CALENDAR]);
+  });
+
+  it('gives a plain URL id to a non-recurring event', async () => {
+    const caldav = await freshCaldav();
+    const ics = wrapCalendar([buildVevent({ uid: 'p1', summary: 'Plain', dtstart: '20260914T100000Z', dtend: '20260914T110000Z' })]);
+    mockClient.fetchCalendarObjects.mockResolvedValue([{ url: `${TEST_CALENDAR.url}p1.ics`, etag: 'e', data: ics }]);
+
+    const events = await caldav.listEvents({ calendarId: TEST_CALENDAR.url, startDate: '2026-09-01T00:00:00Z', endDate: '2026-09-30T00:00:00Z' });
+
+    expect(events[0].id).toBe(`${TEST_CALENDAR.url}p1.ics`);
+  });
+
+  it('gives a RECURRENCE-ID-based id to an expanded occurrence, correct even though the master starts in January', async () => {
+    const caldav = await freshCaldav();
+    const ics = wrapCalendar([
+      buildVevent({
+        uid: 'r1',
+        summary: 'Weekly',
+        dtstart: '20260914T100000Z',
+        dtend: '20260914T110000Z',
+        recurrenceId: '20260914T100000Z',
+      }),
+    ]);
+    mockClient.fetchCalendarObjects.mockResolvedValue([{ url: `${TEST_CALENDAR.url}r1.ics`, etag: 'e', data: ics }]);
+
+    const events = await caldav.listEvents({ calendarId: TEST_CALENDAR.url, startDate: '2026-09-01T00:00:00Z', endDate: '2026-09-30T00:00:00Z' });
+
+    expect(events[0].id).toBe(`${TEST_CALENDAR.url}r1.ics#2026-09-14T10:00:00.000Z`);
+    expect(events[0].start).toBe('2026-09-14T10:00:00.000Z');
+  });
+
+  it('excludes cancelled occurrences', async () => {
+    const caldav = await freshCaldav();
+    const ics = wrapCalendar([
+      buildVevent({
+        uid: 'c1',
+        summary: 'Cancelled instance',
+        dtstart: '20260914T100000Z',
+        dtend: '20260914T110000Z',
+        recurrenceId: '20260914T100000Z',
+        status: 'CANCELLED',
+      }),
+    ]);
+    mockClient.fetchCalendarObjects.mockResolvedValue([{ url: `${TEST_CALENDAR.url}c1.ics`, etag: 'e', data: ics }]);
+
+    const events = await caldav.listEvents({ calendarId: TEST_CALENDAR.url, startDate: '2026-09-01T00:00:00Z', endDate: '2026-09-30T00:00:00Z' });
+
+    expect(events).toHaveLength(0);
+  });
+
+  it('returns exactly one event for a window containing a single occurrence', async () => {
+    const caldav = await freshCaldav();
+    const ics = wrapCalendar([
+      buildVevent({ uid: 's1', summary: 'Solo', dtstart: '20260914T100000Z', dtend: '20260914T110000Z', recurrenceId: '20260914T100000Z' }),
+    ]);
+    mockClient.fetchCalendarObjects.mockResolvedValue([{ url: `${TEST_CALENDAR.url}s1.ics`, etag: 'e', data: ics }]);
+
+    const events = await caldav.listEvents({ calendarId: TEST_CALENDAR.url, startDate: '2026-09-14T00:00:00Z', endDate: '2026-09-15T00:00:00Z' });
+
+    expect(events).toHaveLength(1);
+  });
+
+  it('rejects a range longer than 366 days', async () => {
+    const caldav = await freshCaldav();
+    await expect(
+      caldav.listEvents({ calendarId: TEST_CALENDAR.url, startDate: '2026-01-01T00:00:00Z', endDate: '2028-01-01T00:00:00Z' }),
+    ).rejects.toThrow(/366-day maximum/);
+  });
+
+  it('rejects an inverted range', async () => {
+    const caldav = await freshCaldav();
+    await expect(
+      caldav.listEvents({ calendarId: TEST_CALENDAR.url, startDate: '2026-09-30T00:00:00Z', endDate: '2026-09-01T00:00:00Z' }),
+    ).rejects.toThrow(/must be before/);
+  });
+});
