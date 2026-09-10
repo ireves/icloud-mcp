@@ -8,6 +8,7 @@ import {
   listMessages,
   listMoveOperations,
   markMessage,
+  markScanned,
   moveMessage,
   undoMove,
 } from '../lib/imap.js';
@@ -43,14 +44,23 @@ export function registerMailTools(server: McpServer): void {
     {
       title: 'List Mail Messages',
       description:
-        'Lists message headers (subject, sender, date, unread status, UID) in a folder — not full bodies. Use get_message for a full body. Returns next_cursor when more messages remain; pass it as before_uid to page further back.',
+        'Lists message headers (subject, sender, date, unread status, UID) in a folder — not full bodies. Use get_message for a full body. ' +
+        'For backfill: page backward through history by passing next_cursor back as before_uid until next_cursor is absent. ' +
+        'For a recurring scan: pass since_last_run to skip everything already processed in past runs (oldest-unprocessed-first), then call mark_scanned once you have handled a batch so future runs pick up after it.',
       inputSchema: {
         folder: z.string().describe('Folder path, e.g. "INBOX"'),
         limit: z.number().int().positive().max(200).optional().describe('Max messages to return, default 25'),
         unread_only: z.boolean().optional().describe('Only return unread messages'),
         since_date: z.string().optional().describe('ISO 8601 date; only messages on or after this date'),
         from_address: z.string().optional().describe('Only messages from this sender address'),
-        before_uid: z.number().int().positive().optional().describe("Pagination cursor from a previous call's next_cursor; returns messages older than this UID"),
+        before_uid: z.number().int().positive().optional().describe("Backward pagination cursor from a previous call's next_cursor; returns messages older than this UID"),
+        after_uid: z.number().int().positive().optional().describe('Forward pagination cursor; returns messages newer than this UID, oldest-first'),
+        since_last_run: z
+          .boolean()
+          .optional()
+          .describe(
+            'Only return messages newer than the highest UID ever marked scanned in this folder (via mark_scanned) — excludes everything processed across all past runs, not just the last one.',
+          ),
       },
     },
     async (args) => {
@@ -62,8 +72,32 @@ export function registerMailTools(server: McpServer): void {
           sinceDate: args.since_date,
           fromAddress: args.from_address,
           beforeUid: args.before_uid,
+          afterUid: args.after_uid,
+          sinceLastRun: args.since_last_run,
         });
         return toResult({ messages: result.messages, next_cursor: result.nextCursor });
+      } catch (error) {
+        return toErrorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'mark_scanned',
+    {
+      title: 'Mark Mail Scanned',
+      description:
+        'Records that messages up through this UID have been processed in a folder, so future list_messages calls with since_last_run skip them. ' +
+        'Only moves the mark forward — call it with the highest UID actually handled, only after handling succeeded.',
+      inputSchema: {
+        folder: z.string().describe('Folder path, e.g. "INBOX"'),
+        through_uid: z.number().int().positive().describe('Highest UID that has been successfully processed'),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await markScanned({ folder: args.folder, throughUid: args.through_uid });
+        return toResult({ last_seen_uid: result.lastSeenUid });
       } catch (error) {
         return toErrorResult(error);
       }

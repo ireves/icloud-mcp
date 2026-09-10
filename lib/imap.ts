@@ -15,6 +15,7 @@ import {
   type MoveIdentity,
   type MoveOperationRecord,
 } from './moveLog.js';
+import { advanceLastSeenUid, getLastSeenUid } from './scanProgress.js';
 
 // Network/protocol conditions where the server's actual state is unknown —
 // the command may or may not have taken effect. Everything else (auth
@@ -146,6 +147,8 @@ export interface ListMessagesParams {
   sinceDate?: string;
   fromAddress?: string;
   beforeUid?: number;
+  afterUid?: number;
+  sinceLastRun?: boolean;
 }
 
 export interface ListMessagesResult {
@@ -168,12 +171,42 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
       let uids = await client.search(query, { uid: true });
       if (!uids || uids.length === 0) return { messages: [] };
 
+      let afterUid = params.afterUid;
+      if (params.sinceLastRun) {
+        const lastSeen = await getLastSeenUid(params.folder);
+        if (lastSeen !== null) afterUid = afterUid !== undefined ? Math.max(afterUid, lastSeen) : lastSeen;
+      }
+
+      const limit = params.limit ?? 25;
+
+      if (afterUid !== undefined) {
+        // Forward pagination: oldest-unprocessed-first, so a run that stops
+        // partway through still advances the high-water mark sequentially.
+        uids = uids.filter((uid) => uid > afterUid!).sort((a, b) => a - b);
+        if (uids.length === 0) return { messages: [] };
+
+        const hasMore = uids.length > limit;
+        const limited = uids.slice(0, limit);
+        const results: MessageSummary[] = [];
+        for await (const message of client.fetch(limited, { envelope: true, flags: true, uid: true }, { uid: true })) {
+          results.push({
+            uid: message.uid,
+            subject: message.envelope?.subject ?? '(no subject)',
+            from: message.envelope?.from?.[0]?.address ?? 'unknown',
+            date: message.envelope?.date ? message.envelope.date.toISOString() : '',
+            unread: !message.flags?.has('\\Seen'),
+          });
+        }
+        results.sort((a, b) => a.uid - b.uid);
+        const nextCursor = hasMore ? results[results.length - 1]?.uid : undefined;
+        return { messages: results, nextCursor };
+      }
+
       if (params.beforeUid !== undefined) {
         uids = uids.filter((uid) => uid < params.beforeUid!);
       }
       if (uids.length === 0) return { messages: [] };
 
-      const limit = params.limit ?? 25;
       const hasMore = uids.length > limit;
       const limited = uids.slice(-limit).reverse();
       const results: MessageSummary[] = [];
@@ -491,6 +524,22 @@ export async function undoMove(operationId: string): Promise<{ newOperationId: s
 
 export async function listMoveOperations(params: { limit?: number; cursor?: number }) {
   return listOperations({ limit: params.limit, cursor: params.cursor });
+}
+
+export interface MarkScannedParams {
+  folder: string;
+  throughUid: number;
+}
+
+/**
+ * Advances the folder's high-water mark so a future `since_last_run` call
+ * won't re-return messages up to and including throughUid. Never moves the
+ * mark backwards, so calling this with a stale uid is a no-op.
+ */
+export async function markScanned(params: MarkScannedParams): Promise<{ lastSeenUid: number }> {
+  await advanceLastSeenUid(params.folder, params.throughUid);
+  const lastSeenUid = await getLastSeenUid(params.folder);
+  return { lastSeenUid: lastSeenUid ?? params.throughUid };
 }
 
 export async function getMoveOperation(operationId: string): Promise<MoveOperationRecord | null> {
