@@ -43,25 +43,27 @@ export function registerMailTools(server: McpServer): void {
     {
       title: 'List Mail Messages',
       description:
-        'Lists message headers (subject, sender, date, unread status, UID) in a folder — not full bodies. Use get_message for a full body.',
+        'Lists message headers (subject, sender, date, unread status, UID) in a folder — not full bodies. Use get_message for a full body. Returns next_cursor when more messages remain; pass it as before_uid to page further back.',
       inputSchema: {
         folder: z.string().describe('Folder path, e.g. "INBOX"'),
         limit: z.number().int().positive().max(200).optional().describe('Max messages to return, default 25'),
         unread_only: z.boolean().optional().describe('Only return unread messages'),
         since_date: z.string().optional().describe('ISO 8601 date; only messages on or after this date'),
         from_address: z.string().optional().describe('Only messages from this sender address'),
+        before_uid: z.number().int().positive().optional().describe("Pagination cursor from a previous call's next_cursor; returns messages older than this UID"),
       },
     },
     async (args) => {
       try {
-        const messages = await listMessages({
+        const result = await listMessages({
           folder: args.folder,
           limit: args.limit,
           unreadOnly: args.unread_only,
           sinceDate: args.since_date,
           fromAddress: args.from_address,
+          beforeUid: args.before_uid,
         });
-        return toResult(messages);
+        return toResult({ messages: result.messages, next_cursor: result.nextCursor });
       } catch (error) {
         return toErrorResult(error);
       }

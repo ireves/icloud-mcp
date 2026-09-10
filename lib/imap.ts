@@ -145,9 +145,15 @@ export interface ListMessagesParams {
   unreadOnly?: boolean;
   sinceDate?: string;
   fromAddress?: string;
+  beforeUid?: number;
 }
 
-export async function listMessages(params: ListMessagesParams): Promise<MessageSummary[]> {
+export interface ListMessagesResult {
+  messages: MessageSummary[];
+  nextCursor?: number;
+}
+
+export async function listMessages(params: ListMessagesParams): Promise<ListMessagesResult> {
   const client = getClient();
   await client.connect();
   try {
@@ -159,10 +165,17 @@ export async function listMessages(params: ListMessagesParams): Promise<MessageS
       if (params.fromAddress) searchCriteria.from = params.fromAddress;
       const query = Object.keys(searchCriteria).length > 0 ? searchCriteria : { all: true };
 
-      const uids = await client.search(query, { uid: true });
-      if (!uids || uids.length === 0) return [];
+      let uids = await client.search(query, { uid: true });
+      if (!uids || uids.length === 0) return { messages: [] };
 
-      const limited = uids.slice(-(params.limit ?? 25)).reverse();
+      if (params.beforeUid !== undefined) {
+        uids = uids.filter((uid) => uid < params.beforeUid!);
+      }
+      if (uids.length === 0) return { messages: [] };
+
+      const limit = params.limit ?? 25;
+      const hasMore = uids.length > limit;
+      const limited = uids.slice(-limit).reverse();
       const results: MessageSummary[] = [];
       for await (const message of client.fetch(limited, { envelope: true, flags: true, uid: true }, { uid: true })) {
         results.push({
@@ -173,7 +186,9 @@ export async function listMessages(params: ListMessagesParams): Promise<MessageS
           unread: !message.flags?.has('\\Seen'),
         });
       }
-      return results;
+      results.sort((a, b) => b.uid - a.uid);
+      const nextCursor = hasMore ? results[results.length - 1]?.uid : undefined;
+      return { messages: results, nextCursor };
     } finally {
       lock.release();
     }

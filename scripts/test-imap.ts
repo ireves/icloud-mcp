@@ -16,8 +16,8 @@ async function main() {
   }
 
   console.log(`\n--- list_messages (folder: ${inbox.path}, limit: 5) ---`);
-  const messages = await listMessages({ folder: inbox.path, limit: 5 });
-  console.log(`Found ${messages.length} messages:`);
+  const { messages, nextCursor } = await listMessages({ folder: inbox.path, limit: 5 });
+  console.log(`Found ${messages.length} messages (next_cursor: ${nextCursor ?? 'none'}):`);
   for (const message of messages) {
     console.log(`  uid=${message.uid} unread=${message.unread} "${message.subject}" from ${message.from}`);
   }
