@@ -15,7 +15,7 @@ import {
   type MoveIdentity,
   type MoveOperationRecord,
 } from './moveLog.js';
-import { advanceLastSeenUid, getLastSeenUid } from './scanProgress.js';
+import { advanceLastSeenUid, getLastSeenUid, getPendingFlaggedUids, setPendingFlaggedUids } from './scanProgress.js';
 
 // Network/protocol conditions where the server's actual state is unknown —
 // the command may or may not have taken effect. Everything else (auth
@@ -162,20 +162,24 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
   try {
     const lock = await client.getMailboxLock(params.folder);
     try {
-      const searchCriteria: Record<string, unknown> = {};
-      if (params.unreadOnly) searchCriteria.seen = false;
-      if (params.sinceDate) searchCriteria.since = new Date(params.sinceDate);
-      if (params.fromAddress) searchCriteria.from = params.fromAddress;
-      const query = Object.keys(searchCriteria).length > 0 ? searchCriteria : { all: true };
-
-      let uids = await client.search(query, { uid: true });
-      if (!uids || uids.length === 0) return { messages: [] };
-
       let afterUid = params.afterUid;
       if (params.sinceLastRun) {
         const lastSeen = await getLastSeenUid(params.folder);
         if (lastSeen !== null) afterUid = afterUid !== undefined ? Math.max(afterUid, lastSeen) : lastSeen;
       }
+
+      const searchCriteria: Record<string, unknown> = {};
+      if (params.unreadOnly) searchCriteria.seen = false;
+      if (params.sinceDate) searchCriteria.since = new Date(params.sinceDate);
+      if (params.fromAddress) searchCriteria.from = params.fromAddress;
+      // Flagged messages are excluded from the since-last-run scan entirely
+      // so they never block the high-water mark; reconcileFlagged() is how
+      // an unflagged message gets picked back up for sorting later.
+      if (params.sinceLastRun) searchCriteria.flagged = false;
+      const query = Object.keys(searchCriteria).length > 0 ? searchCriteria : { all: true };
+
+      let uids = await client.search(query, { uid: true });
+      if (!uids || uids.length === 0) return { messages: [] };
 
       const limit = params.limit ?? 25;
 
@@ -540,6 +544,48 @@ export async function markScanned(params: MarkScannedParams): Promise<{ lastSeen
   await advanceLastSeenUid(params.folder, params.throughUid);
   const lastSeenUid = await getLastSeenUid(params.folder);
   return { lastSeenUid: lastSeenUid ?? params.throughUid };
+}
+
+/**
+ * Compares the folder's currently-flagged messages against the set recorded
+ * on the previous call. Anything that was flagged before but isn't anymore
+ * gets returned so it can be sorted, since since_last_run permanently
+ * excludes flagged messages and would otherwise never surface it again.
+ * Always call this before a since_last_run scan.
+ */
+export async function reconcileFlagged(folder: string): Promise<{ newlyUnflagged: MessageSummary[] }> {
+  const client = getClient();
+  await client.connect();
+  try {
+    const lock = await client.getMailboxLock(folder);
+    try {
+      const flaggedSearchResult = await client.search({ flagged: true }, { uid: true });
+      const currentFlaggedUids = flaggedSearchResult ? flaggedSearchResult : [];
+      const previousPending = await getPendingFlaggedUids(folder);
+      const currentSet = new Set(currentFlaggedUids);
+      const newlyUnflaggedUids = previousPending.filter((uid) => !currentSet.has(uid));
+
+      const newlyUnflagged: MessageSummary[] = [];
+      if (newlyUnflaggedUids.length > 0) {
+        for await (const message of client.fetch(newlyUnflaggedUids, { envelope: true, flags: true, uid: true }, { uid: true })) {
+          newlyUnflagged.push({
+            uid: message.uid,
+            subject: message.envelope?.subject ?? '(no subject)',
+            from: message.envelope?.from?.[0]?.address ?? 'unknown',
+            date: message.envelope?.date ? message.envelope.date.toISOString() : '',
+            unread: !message.flags?.has('\\Seen'),
+          });
+        }
+      }
+
+      await setPendingFlaggedUids(folder, currentFlaggedUids);
+      return { newlyUnflagged };
+    } finally {
+      lock.release();
+    }
+  } finally {
+    await client.logout();
+  }
 }
 
 export async function getMoveOperation(operationId: string): Promise<MoveOperationRecord | null> {

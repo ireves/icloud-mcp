@@ -10,6 +10,7 @@ import {
   markMessage,
   markScanned,
   moveMessage,
+  reconcileFlagged,
   undoMove,
 } from '../lib/imap.js';
 
@@ -59,7 +60,7 @@ export function registerMailTools(server: McpServer): void {
           .boolean()
           .optional()
           .describe(
-            'Only return messages newer than the highest UID ever marked scanned in this folder (via mark_scanned) — excludes everything processed across all past runs, not just the last one.',
+            'Only return messages newer than the highest UID ever marked scanned in this folder (via mark_scanned) — excludes everything processed across all past runs, not just the last one. Also always excludes currently-flagged messages; call reconcile_flagged first to catch any that were unflagged since the last run.',
           ),
       },
     },
@@ -98,6 +99,26 @@ export function registerMailTools(server: McpServer): void {
       try {
         const result = await markScanned({ folder: args.folder, throughUid: args.through_uid });
         return toResult({ last_seen_uid: result.lastSeenUid });
+      } catch (error) {
+        return toErrorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'reconcile_flagged',
+    {
+      title: 'Reconcile Flagged Mail',
+      description:
+        'Call this before a since_last_run scan. Compares the folder\'s currently-flagged messages against what was flagged on the previous call, and returns any that were unflagged since then — since_last_run permanently excludes flagged messages, so this is the only way an unflagged message gets picked back up for sorting. Returns an empty list when nothing changed.',
+      inputSchema: {
+        folder: z.string().describe('Folder path, e.g. "INBOX"'),
+      },
+    },
+    async (args) => {
+      try {
+        const result = await reconcileFlagged(args.folder);
+        return toResult({ newly_unflagged: result.newlyUnflagged });
       } catch (error) {
         return toErrorResult(error);
       }
