@@ -91,6 +91,17 @@ function checkMetadata() {
 async function checkToken(token: string) {
   console.log('\n--- supplied access token ---');
 
+  // A signed token has three dot-separated parts. Five means it is encrypted
+  // (a JWE), which Auth0 issues when it has no audience to address the token to.
+  // The server cannot read it, so name the cause rather than just failing.
+  if (token.split('.').length === 5) {
+    fail(
+      'That token is encrypted, not signed, so this server cannot read it',
+      'Auth0 does this when no audience is set. In the Auth0 dashboard, go to Settings → General → Default Audience and set it to this server\'s URL, then sign in again.',
+    );
+    return;
+  }
+
   let claims: ReturnType<typeof decodeJwt>;
   try {
     claims = decodeJwt(token);
