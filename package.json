@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:imap": "tsx scripts/test-imap.ts",
-    "test:caldav": "tsx scripts/test-caldav.ts"
+    "test:caldav": "tsx scripts/test-caldav.ts",
+    "check:oauth": "tsx scripts/check-oauth.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
@@ -18,6 +19,7 @@
     "html-to-text": "^9.0.5",
     "ical.js": "^2.1.0",
     "imapflow": "^1.0.171",
+    "jose": "^6.2.12",
     "mailparser": "^3.7.1",
     "tsdav": "^2.0.6",
     "zod": "^3.23.8"

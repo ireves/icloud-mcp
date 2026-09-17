@@ -1,14 +1,24 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { isAuthorized } from '../lib/auth.js';
+import { authenticate, challengeHeader } from '../lib/auth.js';
+import { metadataUrl } from '../lib/metadata.js';
 import { registerMailTools } from '../tools/mail.js';
 import { registerCalendarTools } from '../tools/calendar.js';
 import { registerReminderTools } from '../tools/reminders.js';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (!isAuthorized(req.headers.authorization)) {
-    res.status(401).json({ error: 'Unauthorized' });
+  const auth = await authenticate(req.headers.authorization);
+
+  if (!auth.ok) {
+    // The challenge tells the client where to discover its authorization
+    // server. The reason is logged but not returned, so a caller cannot use
+    // the response to probe how the token failed.
+    console.warn(`MCP request rejected (${auth.reason}): ${auth.detail}`);
+    res.setHeader('WWW-Authenticate', challengeHeader(auth, metadataUrl(req.headers.host)));
+    res.status(auth.status).json({
+      error: auth.status === 403 ? 'Forbidden' : 'Unauthorized',
+    });
     return;
   }
 
