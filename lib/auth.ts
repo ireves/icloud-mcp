@@ -31,6 +31,7 @@ export type AuthResult =
 const DEFAULT_REQUIRED_SCOPE = 'mcp:access';
 
 let cachedJwks: { issuer: string; jwks: ReturnType<typeof createRemoteJWKSet> } | undefined;
+let cachedJwksUri: { issuer: string; uri: string } | undefined;
 
 function oauthIssuer(): string | undefined {
   const issuer = process.env.OAUTH_ISSUER?.trim();
@@ -63,10 +64,55 @@ export function authorizationServers(): string[] {
   return issuer ? [issuer] : [];
 }
 
-function jwksFor(issuer: string) {
+/**
+ * Finds the authorization server's signing keys.
+ *
+ * Providers publish these at different paths (WorkOS, Auth0 and Clerk all
+ * differ), so rather than hardcode a guess the issuer's own discovery document
+ * is read and its `jwks_uri` used. OAUTH_JWKS_URI skips the lookup entirely.
+ * The result is cached for the life of the instance.
+ */
+async function discoverJwksUri(issuer: string): Promise<string> {
+  const override = process.env.OAUTH_JWKS_URI?.trim();
+  if (override) return override;
+  if (cachedJwksUri?.issuer === issuer) return cachedJwksUri.uri;
+
+  // RFC 8414 first, since an OAuth authorization server need not be an OpenID
+  // provider; the OIDC path is the fallback.
+  const candidates = [
+    `${issuer}/.well-known/oauth-authorization-server`,
+    `${issuer}/.well-known/openid-configuration`,
+  ];
+
+  const failures: string[] = [];
+  for (const url of candidates) {
+    try {
+      const response = await fetch(url, { headers: { accept: 'application/json' } });
+      if (!response.ok) {
+        failures.push(`${url} returned ${response.status}`);
+        continue;
+      }
+      const metadata = (await response.json()) as { jwks_uri?: unknown };
+      if (typeof metadata.jwks_uri === 'string' && metadata.jwks_uri) {
+        cachedJwksUri = { issuer, uri: metadata.jwks_uri };
+        return metadata.jwks_uri;
+      }
+      failures.push(`${url} has no jwks_uri`);
+    } catch (err) {
+      failures.push(`${url}: ${err instanceof Error ? err.message : 'request failed'}`);
+    }
+  }
+
+  throw new Error(
+    `Could not discover signing keys for ${issuer} (${failures.join('; ')}). ` +
+      'Check OAUTH_ISSUER, or set OAUTH_JWKS_URI to the key set URL directly.',
+  );
+}
+
+async function jwksFor(issuer: string) {
+  const uri = await discoverJwksUri(issuer);
   if (cachedJwks?.issuer !== issuer) {
-    const url = process.env.OAUTH_JWKS_URI?.trim() || `${issuer}/.well-known/jwks.json`;
-    cachedJwks = { issuer, jwks: createRemoteJWKSet(new URL(url)) };
+    cachedJwks = { issuer, jwks: createRemoteJWKSet(new URL(uri)) };
   }
   return cachedJwks.jwks;
 }
@@ -122,9 +168,13 @@ export async function authenticate(authHeader: string | string[] | undefined): P
     return { authorized: false, error: 'invalid_token', description: 'Token not recognised' };
   }
 
+  // Resolved outside the try below so a discovery failure surfaces as the
+  // configuration error it is, rather than being reported as a bad token.
+  const jwks = await jwksFor(issuer);
+
   let payload: JWTPayload;
   try {
-    ({ payload } = await jwtVerify(token, jwksFor(issuer), { issuer, audience }));
+    ({ payload } = await jwtVerify(token, jwks, { issuer, audience }));
   } catch (err) {
     const reason = err instanceof Error ? err.message : 'verification failed';
     return { authorized: false, error: 'invalid_token', description: `Access token rejected: ${reason}` };

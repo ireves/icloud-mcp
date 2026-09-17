@@ -16,7 +16,11 @@ This password is used for both mail (IMAP) and calendar/reminders (CalDAV). Do n
 
 Access to this server is protected by OAuth. You sign in through an outside service (Auth0, Clerk, WorkOS, Okta, Keycloak — anything publishing standard OpenID Connect discovery), and this server only checks that the token it receives is genuine. No sign-in screen, password or token store lives in this project.
 
-In that service, create an **API** (some call it a resource or audience) whose identifier is your deployed MCP endpoint, e.g. `https://icloud-mcp-yourname.vercel.app/api/mcp`, and give it a scope named `mcp:access`. Allow dynamic client registration if the service offers it, since that is how Claude registers itself.
+In that service, register this server as an **API** (some call it a resource, an audience, or a resource indicator) whose identifier is your deployed MCP endpoint, e.g. `https://icloud-mcp-yourname.vercel.app/api/mcp`, and give it a scope named `mcp:access`.
+
+That identifier must match `OAUTH_AUDIENCE` below, character for character. If the sign-in service doesn't recognise it, it will fall back to issuing tokens for itself instead, and every request here is refused with a `401`.
+
+Also allow Claude to register itself, which providers offer either as **dynamic client registration** or as **client ID metadata documents** (the newer of the two). Either works.
 
 ### 3. Set environment variables
 
@@ -29,7 +33,7 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 | `OAUTH_ISSUER` | The sign-in service's base URL, exactly as it appears in the `iss` claim of its tokens |
 | `OAUTH_AUDIENCE` | This server's identifier, as registered in step 2. Tokens must name it |
 | `OAUTH_REQUIRED_SCOPE` | Optional. Scope a token must carry. Defaults to `mcp:access`; set it empty to skip the check |
-| `OAUTH_JWKS_URI` | Optional. Only if signing keys are published somewhere other than `<issuer>/.well-known/jwks.json` |
+| `OAUTH_JWKS_URI` | Optional. The signing key location is found automatically from the issuer's discovery document; set this only if that lookup fails |
 | `PUBLIC_BASE_URL` | Optional. Overrides the public URL in the discovery document. Normally worked out from the request |
 | `MCP_AUTH_TOKEN` | Optional, being retired. The original shared secret. While set, it is still accepted alongside OAuth so an existing connector keeps working |
 | `KV_REST_API_URL` | REST URL for the Upstash Redis database used to track moves for undo. Set automatically, under this name, when you connect the Upstash integration to this project in Vercel's Storage tab. |
@@ -62,6 +66,8 @@ The server acts purely as a resource server, in OAuth terms, so it checks tokens
 2. Claude fetches `/.well-known/oauth-protected-resource/api/mcp`, which names the sign-in service and the scope required.
 3. Claude registers itself with that service, sends you to sign in, and receives a short-lived access token.
 4. Every later call carries that token. The server checks the signature against the service's published keys, checks the issuer and audience, and checks the scope, before any tool runs.
+
+The server finds those signing keys by reading the sign-in service's own discovery document (`/.well-known/oauth-authorization-server`, falling back to `/.well-known/openid-configuration`) and using the `jwks_uri` it names, since providers publish them at different paths. The result is cached, and `OAUTH_JWKS_URI` overrides it if that lookup ever fails.
 
 Because the token expires and can be revoked at the sign-in service, losing one is far less serious than losing the old shared secret.
 

@@ -44,15 +44,21 @@ beforeEach(async () => {
 
   process.env.OAUTH_ISSUER = ISSUER;
   process.env.OAUTH_AUDIENCE = AUDIENCE;
+  // Most tests are about token checking, not key lookup, so the override short-
+  // circuits discovery. The discovery suite below clears it.
+  process.env.OAUTH_JWKS_URI = `${ISSUER}/oauth2/jwks`;
   delete process.env.OAUTH_REQUIRED_SCOPE;
   delete process.env.MCP_AUTH_TOKEN;
+  vi.unstubAllGlobals();
 });
 
 afterEach(() => {
   delete process.env.OAUTH_ISSUER;
   delete process.env.OAUTH_AUDIENCE;
+  delete process.env.OAUTH_JWKS_URI;
   delete process.env.OAUTH_REQUIRED_SCOPE;
   delete process.env.MCP_AUTH_TOKEN;
+  vi.unstubAllGlobals();
 });
 
 describe('authenticate — OAuth access tokens', () => {
@@ -221,6 +227,107 @@ describe('authenticate — configuration errors', () => {
     const { authenticate } = await freshAuth();
 
     await expect(authenticate('Bearer anything')).rejects.toThrow(/OAUTH_AUDIENCE/);
+  });
+});
+
+describe('signing key discovery', () => {
+  function mockFetch(responses: Record<string, { status: number; body?: unknown }>) {
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = input.toString();
+      const match = responses[url];
+      if (!match) return new Response('not found', { status: 404 });
+      return new Response(match.body === undefined ? '' : JSON.stringify(match.body), {
+        status: match.status,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  it('reads jwks_uri from the RFC 8414 authorization server metadata', async () => {
+    delete process.env.OAUTH_JWKS_URI;
+    const fetchMock = mockFetch({
+      [`${ISSUER}/.well-known/oauth-authorization-server`]: {
+        status: 200,
+        body: { issuer: ISSUER, jwks_uri: `${ISSUER}/oauth2/jwks` },
+      },
+    });
+    const { authenticate } = await freshAuth();
+
+    expect((await authenticate(`Bearer ${await sign({ scope: 'mcp:access' })}`)).authorized).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${ISSUER}/.well-known/oauth-authorization-server`,
+      expect.objectContaining({ headers: { accept: 'application/json' } }),
+    );
+  });
+
+  it('falls back to the OpenID Connect document when the OAuth one is absent', async () => {
+    delete process.env.OAUTH_JWKS_URI;
+    const fetchMock = mockFetch({
+      [`${ISSUER}/.well-known/openid-configuration`]: {
+        status: 200,
+        body: { issuer: ISSUER, jwks_uri: `${ISSUER}/keys` },
+      },
+    });
+    const { authenticate } = await freshAuth();
+
+    expect((await authenticate(`Bearer ${await sign({ scope: 'mcp:access' })}`)).authorized).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('caches the discovered URL instead of refetching on every request', async () => {
+    delete process.env.OAUTH_JWKS_URI;
+    const fetchMock = mockFetch({
+      [`${ISSUER}/.well-known/oauth-authorization-server`]: {
+        status: 200,
+        body: { jwks_uri: `${ISSUER}/oauth2/jwks` },
+      },
+    });
+    const { authenticate } = await freshAuth();
+
+    await authenticate(`Bearer ${await sign({ scope: 'mcp:access' })}`);
+    await authenticate(`Bearer ${await sign({ scope: 'mcp:access' })}`);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips discovery entirely when OAUTH_JWKS_URI is set', async () => {
+    const fetchMock = mockFetch({});
+    const { authenticate } = await freshAuth();
+
+    expect((await authenticate(`Bearer ${await sign({ scope: 'mcp:access' })}`)).authorized).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('raises a configuration error, not a token error, when discovery fails', async () => {
+    delete process.env.OAUTH_JWKS_URI;
+    mockFetch({});
+    const { authenticate } = await freshAuth();
+
+    await expect(authenticate(`Bearer ${await sign({ scope: 'mcp:access' })}`)).rejects.toThrow(
+      /Could not discover signing keys.*OAUTH_JWKS_URI/s,
+    );
+  });
+
+  it('raises a configuration error when the document omits jwks_uri', async () => {
+    delete process.env.OAUTH_JWKS_URI;
+    mockFetch({
+      [`${ISSUER}/.well-known/oauth-authorization-server`]: { status: 200, body: { issuer: ISSUER } },
+    });
+    const { authenticate } = await freshAuth();
+
+    await expect(authenticate(`Bearer ${await sign({ scope: 'mcp:access' })}`)).rejects.toThrow(/no jwks_uri/);
+  });
+
+  it('does not attempt discovery when the legacy secret matches', async () => {
+    delete process.env.OAUTH_JWKS_URI;
+    process.env.MCP_AUTH_TOKEN = 'legacy-secret-value';
+    const fetchMock = mockFetch({});
+    const { authenticate } = await freshAuth();
+
+    expect((await authenticate('Bearer legacy-secret-value')).authorized).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
