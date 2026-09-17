@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:imap": "tsx scripts/test-imap.ts",
-    "test:caldav": "tsx scripts/test-caldav.ts"
+    "test:caldav": "tsx scripts/test-caldav.ts",
+    "check:oauth": "tsx scripts/check-oauth.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

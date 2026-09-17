@@ -23,7 +23,7 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 | `OAUTH_ISSUER` | The base URL of your authorization server, e.g. `https://your-tenant.eu.auth0.com`. Required for OAuth sign-in. |
 | `OAUTH_AUDIENCE` | The canonical URL of this MCP server, e.g. `https://<your-deployment>/api/mcp`. Access tokens are only accepted if they were issued for this audience. Required for OAuth sign-in. |
 | `OAUTH_REQUIRED_SCOPE` | Optional. Space-separated scopes a token must carry, e.g. `icloud:read icloud:write`. When unset, any valid token for this audience is accepted. |
-| `OAUTH_JWKS_URI` | Optional. Only needed if your provider publishes its signing keys somewhere other than `<issuer>/.well-known/jwks.json`. |
+| `OAUTH_JWKS_URI` | Optional. The signing key address is discovered from the issuer automatically, so this is only needed for a provider that publishes no discovery document. |
 | `MCP_AUTH_TOKEN` | Optional fallback shared secret, for scripts and scheduled runs that cannot complete an interactive sign-in. Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Leave unset to accept OAuth only. |
 | `KV_REST_API_URL` | REST URL for the Upstash Redis database used to track moves for undo. Set automatically, under this name, when you connect the Upstash integration to this project in Vercel's Storage tab. |
 | `KV_REST_API_TOKEN` | REST token for the same Upstash database. Also set automatically by the Vercel integration. |
@@ -58,8 +58,10 @@ Two separate things are being protected, and they do not use the same mechanism:
 
 Any provider that issues JWT access tokens and publishes OpenID discovery metadata will work, including Auth0, Clerk, WorkOS, Stytch and Descope. What the provider has to do:
 
-1. Define an API (Auth0 calls this an API, others call it a resource or audience) whose identifier is exactly your MCP URL, e.g. `https://<your-deployment>/api/mcp`. That identifier becomes `OAUTH_AUDIENCE`.
-2. Sign tokens with an asymmetric algorithm (RS256 or ES256) and publish the public keys at `<issuer>/.well-known/jwks.json`. If your provider uses a different path, set `OAUTH_JWKS_URI`.
+1. Register your MCP URL, e.g. `https://<your-deployment>/api/mcp`, as the thing tokens are issued for. Providers name this differently: Auth0 calls it an API, WorkOS calls it a resource indicator (under Connect → Configuration). That identifier becomes `OAUTH_AUDIENCE`.
+
+   This step is not optional. Several providers, WorkOS among them, leave the `aud` claim off their tokens until a resource indicator is registered, and this server rejects a token that is not addressed to it.
+2. Sign tokens with an asymmetric algorithm (RS256 or ES256). The server finds the public keys by reading the issuer's discovery document, so the key address itself needs no configuration.
 3. Allow the client registration that Claude needs. Most MCP clients rely on either OAuth Client ID Metadata Documents or Dynamic Client Registration, so enable whichever your provider supports.
 
 ### What the server does on each request
@@ -69,6 +71,15 @@ Any provider that issues JWT access tokens and publishes OpenID discovery metada
 3. Every later request is checked for signature, issuer, audience and (if set) scope. A valid token missing a required scope gets a `403` naming the scopes needed, so the client can ask for them.
 
 Tokens still travel in the `Authorization: Bearer` header. The change is that they are short-lived and issued after a sign-in, rather than one fixed string pasted into a settings field.
+
+### Checking your setup
+
+```bash
+npm run check:oauth                    # checks the configuration and the issuer
+npm run check:oauth -- <access-token>  # also checks a real token end to end
+```
+
+It reports what clients will discover, whether the signing keys are reachable, and, given a token, whether the audience lines up. The audience mismatch above is the most common cause of a connector that signs in and then fails.
 
 ### The shared-secret fallback
 

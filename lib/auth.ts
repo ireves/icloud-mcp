@@ -79,30 +79,78 @@ export function issuer(): string {
 }
 
 /**
- * Where the authorization server publishes its metadata. Derived from the
- * issuer unless OAUTH_JWKS_URI pins the key set explicitly.
+ * Finds where the authorization server publishes its signing keys.
+ *
+ * Providers disagree on the path: WorkOS serves them at `/oauth2/jwks`, Auth0
+ * at `/.well-known/jwks.json`, others elsewhere. Rather than hard-code a guess,
+ * read the issuer\'s own discovery document (RFC 8414, falling back to OpenID
+ * Connect Discovery) and use the `jwks_uri` it advertises. OAUTH_JWKS_URI skips
+ * discovery for a provider that publishes neither document.
  */
-function jwksUri(): URL {
+export async function discoverJwksUri(): Promise<string> {
   const pinned = optionalEnv('OAUTH_JWKS_URI');
-  return new URL(pinned ?? `${issuer()}/.well-known/jwks.json`);
+  if (pinned) {
+    return new URL(pinned).toString();
+  }
+
+  const base = issuer();
+  const candidates = [
+    `${base}/.well-known/oauth-authorization-server`,
+    `${base}/.well-known/openid-configuration`,
+  ];
+
+  const failures: string[] = [];
+
+  for (const url of candidates) {
+    let document: unknown;
+    try {
+      const response = await fetch(url, { headers: { accept: 'application/json' } });
+      if (!response.ok) {
+        failures.push(`${url} returned ${response.status}`);
+        continue;
+      }
+      document = await response.json();
+    } catch (error) {
+      failures.push(`${url}: ${error instanceof Error ? error.message : 'unreachable'}`);
+      continue;
+    }
+
+    const metadata = document as { issuer?: unknown; jwks_uri?: unknown };
+
+    // RFC 8414 requires the issuer in the document to match the one we asked
+    // about. A mismatch means the document belongs to someone else.
+    if (typeof metadata.issuer === 'string' && metadata.issuer.replace(/\/+$/, '') !== base) {
+      failures.push(`${url} is published by ${metadata.issuer}, not ${base}`);
+      continue;
+    }
+
+    if (typeof metadata.jwks_uri !== 'string') {
+      failures.push(`${url} does not advertise a jwks_uri`);
+      continue;
+    }
+
+    return new URL(metadata.jwks_uri).toString();
+  }
+
+  throw new Error(`Could not discover the signing keys for ${base}. Tried: ${failures.join('; ')}`);
 }
 
 // The key set caches keys and rate-limits refetches, so it is built once per
-// process rather than per request. Keyed by URI so a config change in tests
+// process rather than per request. Keyed by issuer so a config change in tests
 // does not reuse a stale set.
 const jwksCache = new Map<string, JWTVerifyGetKey>();
 
-function keySet(): JWTVerifyGetKey {
-  const uri = jwksUri().toString();
-  let existing = jwksCache.get(uri);
+async function keySet(): Promise<JWTVerifyGetKey> {
+  const cacheKey = optionalEnv('OAUTH_JWKS_URI') ?? issuer();
+  let existing = jwksCache.get(cacheKey);
   if (!existing) {
-    existing = createRemoteJWKSet(new URL(uri));
-    jwksCache.set(uri, existing);
+    existing = createRemoteJWKSet(new URL(await discoverJwksUri()));
+    jwksCache.set(cacheKey, existing);
   }
   return existing;
 }
 
-/** Test seam: drops cached JWKS so a changed issuer takes effect. */
+/** Test seam: drops cached keys so a changed issuer takes effect. */
 export function resetKeyCache(): void {
   jwksCache.clear();
 }
@@ -174,7 +222,7 @@ export async function authenticate(
 
   if (isOAuthConfigured()) {
     try {
-      const { payload } = await jwtVerify(token, keySet(), {
+      const { payload } = await jwtVerify(token, await keySet(), {
         issuer: issuer(),
         // Binds the token to this server. Without it, a token minted for a
         // different resource behind the same issuer would be accepted here.

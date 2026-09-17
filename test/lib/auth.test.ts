@@ -4,6 +4,7 @@ import { SignJWT, exportJWK, generateKeyPair, type JWK } from 'jose';
 import {
   authenticate,
   challengeHeader,
+  discoverJwksUri,
   resetKeyCache,
   type AuthFailure,
 } from '../../lib/auth.js';
@@ -15,18 +16,41 @@ const AUDIENCE = 'https://icloud-mcp.example.com/api/mcp';
 let privateKey: CryptoKey;
 let publicJwk: JWK;
 
-// The auth module fetches the issuer's public keys over HTTPS. Stubbing fetch
-// lets the tests sign real tokens against a real key pair without a network.
-function stubJwksFetch(jwk: JWK) {
-  vi.stubGlobal(
-    'fetch',
-    vi.fn(async () =>
-      new Response(JSON.stringify({ keys: [jwk] }), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      }),
-    ),
-  );
+const JWKS_URL = `${ISSUER}/oauth2/jwks`;
+
+function json(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+/**
+ * Stands in for the authorization server: it serves an RFC 8414 discovery
+ * document pointing at a non-standard key path (as WorkOS does), then the keys
+ * themselves. Stubbing fetch lets the tests sign real tokens against a real key
+ * pair without touching the network.
+ */
+function stubAuthServer(jwk: JWK, options: { discoveryStatus?: number } = {}) {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+
+    if (url === `${ISSUER}/.well-known/oauth-authorization-server`) {
+      if (options.discoveryStatus && options.discoveryStatus !== 200) {
+        return json({ error: 'not found' }, options.discoveryStatus);
+      }
+      return json({ issuer: ISSUER, jwks_uri: JWKS_URL });
+    }
+
+    if (url === JWKS_URL) {
+      return json({ keys: [jwk] });
+    }
+
+    return json({ error: 'unexpected request' }, 404);
+  });
+
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
 }
 
 async function signToken(claims: Record<string, unknown> = {}, overrides: {
@@ -52,7 +76,7 @@ beforeEach(async () => {
   publicJwk.kid = 'test-key';
 
   resetKeyCache();
-  stubJwksFetch(publicJwk);
+  stubAuthServer(publicJwk);
 
   process.env.OAUTH_ISSUER = ISSUER;
   process.env.OAUTH_AUDIENCE = AUDIENCE;
@@ -182,6 +206,60 @@ describe('authenticate — shared secret fallback', () => {
     delete process.env.OAUTH_ISSUER;
     delete process.env.OAUTH_AUDIENCE;
     await expect(authenticate('Bearer anything')).rejects.toThrow(/No authentication is configured/);
+  });
+});
+
+describe('discovering the signing keys', () => {
+  it('reads jwks_uri from the issuer metadata rather than guessing a path', async () => {
+    // WorkOS publishes keys at /oauth2/jwks, not /.well-known/jwks.json.
+    await expect(discoverJwksUri()).resolves.toBe(JWKS_URL);
+  });
+
+  it('falls back to the OpenID Connect document when RFC 8414 is absent', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === `${ISSUER}/.well-known/openid-configuration`) {
+          return json({ issuer: ISSUER, jwks_uri: `${ISSUER}/keys` });
+        }
+        return json({ error: 'not found' }, 404);
+      }),
+    );
+    resetKeyCache();
+    await expect(discoverJwksUri()).resolves.toBe(`${ISSUER}/keys`);
+  });
+
+  it('refuses a discovery document published by a different issuer', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => json({ issuer: 'https://evil.example.com', jwks_uri: 'https://evil.example.com/keys' })),
+    );
+    resetKeyCache();
+    await expect(discoverJwksUri()).rejects.toThrow(/published by https:\/\/evil\.example\.com/);
+  });
+
+  it('skips discovery entirely when OAUTH_JWKS_URI is pinned', async () => {
+    process.env.OAUTH_JWKS_URI = 'https://pinned.example.com/keys';
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    resetKeyCache();
+
+    await expect(discoverJwksUri()).resolves.toBe('https://pinned.example.com/keys');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('explains which URLs it tried when discovery fails', async () => {
+    stubAuthServer(publicJwk, { discoveryStatus: 500 });
+    resetKeyCache();
+    await expect(discoverJwksUri()).rejects.toThrow(/Could not discover the signing keys/);
+  });
+
+  it('rejects a request when the keys cannot be found', async () => {
+    stubAuthServer(publicJwk, { discoveryStatus: 500 });
+    resetKeyCache();
+    const result = await authenticate(`Bearer ${await signToken()}`);
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_token' });
   });
 });
 
