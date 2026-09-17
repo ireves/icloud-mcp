@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { decodeJwt } from 'jose';
-import { authenticate, discoverJwksUri, isOAuthConfigured, issuer, requiredScopes, resourceIdentifier } from '../lib/auth.js';
+import { authenticate, discoverAuthServer, isOAuthConfigured, issuer, requiredScopes, resourceIdentifier } from '../lib/auth.js';
 import { protectedResourceMetadata } from '../lib/metadata.js';
 
 /**
@@ -57,12 +57,17 @@ async function checkDiscovery() {
   console.log('\n--- authorization server ---');
 
   try {
-    const jwks = await discoverJwksUri();
-    pass(`signing keys found at ${jwks}`);
+    const metadata = await discoverAuthServer();
+    pass(`signing keys found at ${metadata.jwksUri}`);
+    pass(`tokens will be checked against the issuer "${metadata.issuer}"`);
+    if (metadata.issuer !== issuer()) {
+      console.log('        (your provider publishes it slightly differently to how you typed it,');
+      console.log('         which is normal for Auth0 and is handled automatically)');
+    }
   } catch (error) {
     fail(
       error instanceof Error ? error.message : 'Could not reach the authorization server',
-      'Check OAUTH_ISSUER has no trailing slash and is reachable, or set OAUTH_JWKS_URI to the key address your provider documents.',
+      'Check OAUTH_ISSUER is the full address including https:// and is reachable.',
     );
   }
 }
@@ -103,7 +108,7 @@ async function checkToken(token: string) {
   if (audiences.length === 0) {
     fail(
       'The token carries no audience (aud) claim',
-      'Register this server\'s URL as a resource indicator with your provider. WorkOS does this under Connect → Configuration; without it, tokens are issued for your client ID instead and will be rejected here.',
+      'Register this server\'s URL with your provider as the thing tokens are for: in Auth0, create an API whose identifier is that URL and request it as the audience; in WorkOS, add it as a resource indicator. Without that, the token is not addressed to this server and is rejected.',
     );
   } else if (!audiences.includes(resourceIdentifier())) {
     fail(

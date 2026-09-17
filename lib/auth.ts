@@ -78,22 +78,38 @@ export function issuer(): string {
   return value.replace(/\/+$/, '');
 }
 
+/** What the issuer's discovery document tells us about it. */
+export interface AuthServerMetadata {
+  /**
+   * The issuer exactly as the authorization server publishes it, which is what
+   * appears in the `iss` claim of its tokens. Auth0 publishes a trailing slash
+   * (`https://tenant.auth0.com/`) and most others do not, so the published form
+   * is kept verbatim rather than normalised.
+   */
+  issuer: string;
+  jwksUri: string;
+}
+
 /**
- * Finds where the authorization server publishes its signing keys.
+ * Asks the authorization server where its signing keys are and what it calls
+ * itself.
  *
- * Providers disagree on the path: WorkOS serves them at `/oauth2/jwks`, Auth0
- * at `/.well-known/jwks.json`, others elsewhere. Rather than hard-code a guess,
- * read the issuer\'s own discovery document (RFC 8414, falling back to OpenID
- * Connect Discovery) and use the `jwks_uri` it advertises. OAUTH_JWKS_URI skips
- * discovery for a provider that publishes neither document.
+ * Providers disagree on both. WorkOS serves keys at `/oauth2/jwks` and Auth0 at
+ * `/.well-known/jwks.json`; Auth0 puts a trailing slash on its issuer and WorkOS
+ * does not. Rather than hard-code either, read the RFC 8414 document (falling
+ * back to OpenID Connect Discovery) and take the provider at its word.
+ *
+ * OAUTH_JWKS_URI skips discovery for a provider that publishes neither document.
  */
-export async function discoverJwksUri(): Promise<string> {
+export async function discoverAuthServer(): Promise<AuthServerMetadata> {
+  const base = issuer();
   const pinned = optionalEnv('OAUTH_JWKS_URI');
+
   if (pinned) {
-    return new URL(pinned).toString();
+    // No document to consult, so accept the configured issuer as published.
+    return { issuer: base, jwksUri: new URL(pinned).toString() };
   }
 
-  const base = issuer();
   const candidates = [
     `${base}/.well-known/oauth-authorization-server`,
     `${base}/.well-known/openid-configuration`,
@@ -117,42 +133,52 @@ export async function discoverJwksUri(): Promise<string> {
 
     const metadata = document as { issuer?: unknown; jwks_uri?: unknown };
 
-    // RFC 8414 requires the issuer in the document to match the one we asked
-    // about. A mismatch means the document belongs to someone else.
-    if (typeof metadata.issuer === 'string' && metadata.issuer.replace(/\/+$/, '') !== base) {
-      failures.push(`${url} is published by ${metadata.issuer}, not ${base}`);
-      continue;
-    }
-
     if (typeof metadata.jwks_uri !== 'string') {
       failures.push(`${url} does not advertise a jwks_uri`);
       continue;
     }
 
-    return new URL(metadata.jwks_uri).toString();
+    // RFC 8414 requires the issuer in the document to match the one we asked
+    // about. Compare ignoring a trailing slash, since that is a formatting
+    // difference between providers rather than a different issuer, but keep the
+    // published form for validating tokens.
+    const published = typeof metadata.issuer === 'string' ? metadata.issuer : base;
+    if (published.replace(/\/+$/, '') !== base) {
+      failures.push(`${url} is published by ${published}, not ${base}`);
+      continue;
+    }
+
+    return { issuer: published, jwksUri: new URL(metadata.jwks_uri).toString() };
   }
 
-  throw new Error(`Could not discover the signing keys for ${base}. Tried: ${failures.join('; ')}`);
+  throw new Error(`Could not reach the authorization server at ${base}. Tried: ${failures.join('; ')}`);
 }
 
-// The key set caches keys and rate-limits refetches, so it is built once per
-// process rather than per request. Keyed by issuer so a config change in tests
-// does not reuse a stale set.
-const jwksCache = new Map<string, JWTVerifyGetKey>();
+// Discovery and the key set are cached per issuer: the keys rate-limit their own
+// refetches, and the document rarely changes. Keyed so a config change in tests
+// does not reuse a stale entry.
+const serverCache = new Map<string, Promise<{ metadata: AuthServerMetadata; keys: JWTVerifyGetKey }>>();
 
-async function keySet(): Promise<JWTVerifyGetKey> {
-  const cacheKey = optionalEnv('OAUTH_JWKS_URI') ?? issuer();
-  let existing = jwksCache.get(cacheKey);
+function authServer(): Promise<{ metadata: AuthServerMetadata; keys: JWTVerifyGetKey }> {
+  const cacheKey = `${issuer()}|${optionalEnv('OAUTH_JWKS_URI') ?? ''}`;
+  let existing = serverCache.get(cacheKey);
   if (!existing) {
-    existing = createRemoteJWKSet(new URL(await discoverJwksUri()));
-    jwksCache.set(cacheKey, existing);
+    existing = discoverAuthServer()
+      .then((metadata) => ({ metadata, keys: createRemoteJWKSet(new URL(metadata.jwksUri)) }))
+      // A failed lookup must not be cached, or one outage would stick until the
+      // next deployment.
+      .catch((error) => {
+        serverCache.delete(cacheKey);
+        throw error;
+      });
+    serverCache.set(cacheKey, existing);
   }
   return existing;
 }
 
 /** Test seam: drops cached keys so a changed issuer takes effect. */
 export function resetKeyCache(): void {
-  jwksCache.clear();
+  serverCache.clear();
 }
 
 function extractBearer(authHeader: string | string[] | undefined): string | null {
@@ -222,8 +248,11 @@ export async function authenticate(
 
   if (isOAuthConfigured()) {
     try {
-      const { payload } = await jwtVerify(token, await keySet(), {
-        issuer: issuer(),
+      const { metadata, keys } = await authServer();
+      const { payload } = await jwtVerify(token, keys, {
+        // The issuer exactly as the provider publishes it, not as it was typed
+        // into the environment.
+        issuer: metadata.issuer,
         // Binds the token to this server. Without it, a token minted for a
         // different resource behind the same issuer would be accepted here.
         audience: resourceIdentifier(),

@@ -4,7 +4,7 @@ import { SignJWT, exportJWK, generateKeyPair, type JWK } from 'jose';
 import {
   authenticate,
   challengeHeader,
-  discoverJwksUri,
+  discoverAuthServer,
   resetKeyCache,
   type AuthFailure,
 } from '../../lib/auth.js';
@@ -31,7 +31,10 @@ function json(body: unknown, status = 200) {
  * themselves. Stubbing fetch lets the tests sign real tokens against a real key
  * pair without touching the network.
  */
-function stubAuthServer(jwk: JWK, options: { discoveryStatus?: number } = {}) {
+function stubAuthServer(
+  jwk: JWK,
+  options: { discoveryStatus?: number; publishedIssuer?: string } = {},
+) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
 
@@ -39,7 +42,7 @@ function stubAuthServer(jwk: JWK, options: { discoveryStatus?: number } = {}) {
       if (options.discoveryStatus && options.discoveryStatus !== 200) {
         return json({ error: 'not found' }, options.discoveryStatus);
       }
-      return json({ issuer: ISSUER, jwks_uri: JWKS_URL });
+      return json({ issuer: options.publishedIssuer ?? ISSUER, jwks_uri: JWKS_URL });
     }
 
     if (url === JWKS_URL) {
@@ -212,7 +215,7 @@ describe('authenticate — shared secret fallback', () => {
 describe('discovering the signing keys', () => {
   it('reads jwks_uri from the issuer metadata rather than guessing a path', async () => {
     // WorkOS publishes keys at /oauth2/jwks, not /.well-known/jwks.json.
-    await expect(discoverJwksUri()).resolves.toBe(JWKS_URL);
+    await expect(discoverAuthServer()).resolves.toMatchObject({ jwksUri: JWKS_URL });
   });
 
   it('falls back to the OpenID Connect document when RFC 8414 is absent', async () => {
@@ -227,7 +230,7 @@ describe('discovering the signing keys', () => {
       }),
     );
     resetKeyCache();
-    await expect(discoverJwksUri()).resolves.toBe(`${ISSUER}/keys`);
+    await expect(discoverAuthServer()).resolves.toMatchObject({ jwksUri: `${ISSUER}/keys` });
   });
 
   it('refuses a discovery document published by a different issuer', async () => {
@@ -236,7 +239,7 @@ describe('discovering the signing keys', () => {
       vi.fn(async () => json({ issuer: 'https://evil.example.com', jwks_uri: 'https://evil.example.com/keys' })),
     );
     resetKeyCache();
-    await expect(discoverJwksUri()).rejects.toThrow(/published by https:\/\/evil\.example\.com/);
+    await expect(discoverAuthServer()).rejects.toThrow(/published by https:\/\/evil\.example\.com/);
   });
 
   it('skips discovery entirely when OAUTH_JWKS_URI is pinned', async () => {
@@ -245,14 +248,50 @@ describe('discovering the signing keys', () => {
     vi.stubGlobal('fetch', fetchMock);
     resetKeyCache();
 
-    await expect(discoverJwksUri()).resolves.toBe('https://pinned.example.com/keys');
+    await expect(discoverAuthServer()).resolves.toMatchObject({ jwksUri: 'https://pinned.example.com/keys' });
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps a trailing slash the provider publishes, as Auth0 does', async () => {
+    stubAuthServer(publicJwk, { publishedIssuer: `${ISSUER}/` });
+    resetKeyCache();
+    await expect(discoverAuthServer()).resolves.toMatchObject({ issuer: `${ISSUER}/` });
+  });
+
+  it('accepts an Auth0-style token whose iss claim carries a trailing slash', async () => {
+    // OAUTH_ISSUER is set without the slash, but Auth0 signs tokens with one.
+    // Validation must follow what the provider publishes, not what was typed in.
+    stubAuthServer(publicJwk, { publishedIssuer: `${ISSUER}/` });
+    resetKeyCache();
+
+    const token = await signToken({}, { issuer: `${ISSUER}/` });
+    const result = await authenticate(`Bearer ${token}`);
+    expect(result).toMatchObject({ ok: true, method: 'oauth' });
+  });
+
+  it('still rejects a token whose issuer differs by more than a trailing slash', async () => {
+    stubAuthServer(publicJwk, { publishedIssuer: `${ISSUER}/` });
+    resetKeyCache();
+
+    const token = await signToken({}, { issuer: 'https://auth.example.com.evil.test/' });
+    const result = await authenticate(`Bearer ${token}`);
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_token' });
+  });
+
+  it('does not cache a failed lookup, so a later request can recover', async () => {
+    stubAuthServer(publicJwk, { discoveryStatus: 500 });
+    resetKeyCache();
+    await expect(discoverAuthServer()).rejects.toThrow();
+
+    stubAuthServer(publicJwk);
+    const result = await authenticate(`Bearer ${await signToken()}`);
+    expect(result).toMatchObject({ ok: true, method: 'oauth' });
   });
 
   it('explains which URLs it tried when discovery fails', async () => {
     stubAuthServer(publicJwk, { discoveryStatus: 500 });
     resetKeyCache();
-    await expect(discoverJwksUri()).rejects.toThrow(/Could not discover the signing keys/);
+    await expect(discoverAuthServer()).rejects.toThrow(/Could not reach the authorization server/);
   });
 
   it('rejects a request when the keys cannot be found', async () => {

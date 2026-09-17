@@ -20,7 +20,7 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 |---|---|
 | `ICLOUD_EMAIL` | Your iCloud email address |
 | `ICLOUD_APP_PASSWORD` | The app-specific password from step 1 |
-| `OAUTH_ISSUER` | The base URL of your authorization server, e.g. `https://your-tenant.eu.auth0.com`. Required for OAuth sign-in. |
+| `OAUTH_ISSUER` | The base URL of your authorization server, e.g. `https://your-tenant.eu.auth0.com`. A trailing slash makes no difference; the server reads the exact form from the provider itself. Required for OAuth sign-in. |
 | `OAUTH_AUDIENCE` | The canonical URL of this MCP server, e.g. `https://<your-deployment>/api/mcp`. Access tokens are only accepted if they were issued for this audience. Required for OAuth sign-in. |
 | `OAUTH_REQUIRED_SCOPE` | Optional. Space-separated scopes a token must carry, e.g. `icloud:read icloud:write`. When unset, any valid token for this audience is accepted. |
 | `OAUTH_JWKS_URI` | Optional. The signing key address is discovered from the issuer automatically, so this is only needed for a provider that publishes no discovery document. |
@@ -60,11 +60,16 @@ Any provider that issues JWT access tokens and publishes OpenID discovery metada
 
 1. Register your MCP URL, e.g. `https://<your-deployment>/api/mcp`, as the thing tokens are issued for. Providers name this differently: Auth0 calls it an API, WorkOS calls it a resource indicator (under Connect → Configuration). That identifier becomes `OAUTH_AUDIENCE`.
 
-   This step is not optional. Several providers, WorkOS among them, leave the `aud` claim off their tokens until a resource indicator is registered, and this server rejects a token that is not addressed to it.
+   This step is not optional. A token that is not addressed to this server is rejected, and several providers, WorkOS among them, leave the `aud` claim off entirely until you register the URL.
 2. Sign tokens with an asymmetric algorithm (RS256 or ES256). The server finds the public keys by reading the issuer's discovery document, so the key address itself needs no configuration.
-3. Allow the client registration that Claude needs. Most MCP clients rely on either OAuth Client ID Metadata Documents or Dynamic Client Registration, so enable whichever your provider supports.
+3. Allow the client registration that Claude needs, or skip it: for a custom connector you can paste a client ID into Claude's advanced settings instead. If you prefer automatic registration, enable Client ID Metadata Documents or Dynamic Client Registration, whichever your provider offers.
+4. Register `https://claude.ai/api/mcp/auth_callback` as an allowed callback URL.
 
 ### What the server does on each request
+
+On startup the server asks your provider where its signing keys are and what it calls itself, by reading the provider's own discovery document. That covers the differences between providers: WorkOS publishes keys at `/oauth2/jwks` and Auth0 at `/.well-known/jwks.json`, and Auth0 puts a trailing slash on its issuer while most others do not. Nothing about that needs configuring.
+
+Then, per request:
 
 1. No token, or a token it cannot verify, gets a `401` with a `WWW-Authenticate` header naming `/.well-known/oauth-protected-resource`.
 2. That document, served by `api/oauth-protected-resource.ts`, names your authorization server. The client signs you in there and comes back with an access token.
