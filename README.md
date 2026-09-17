@@ -20,7 +20,11 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 |---|---|
 | `ICLOUD_EMAIL` | Your iCloud email address |
 | `ICLOUD_APP_PASSWORD` | The app-specific password from step 1 |
-| `MCP_AUTH_TOKEN` | A shared secret this server requires in the `Authorization: Bearer` header. Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
+| `OAUTH_ISSUER` | The base URL of your authorization server, e.g. `https://your-tenant.eu.auth0.com`. Required for OAuth sign-in. |
+| `OAUTH_AUDIENCE` | The canonical URL of this MCP server, e.g. `https://<your-deployment>/api/mcp`. Access tokens are only accepted if they were issued for this audience. Required for OAuth sign-in. |
+| `OAUTH_REQUIRED_SCOPE` | Optional. Space-separated scopes a token must carry, e.g. `icloud:read icloud:write`. When unset, any valid token for this audience is accepted. |
+| `OAUTH_JWKS_URI` | Optional. Only needed if your provider publishes its signing keys somewhere other than `<issuer>/.well-known/jwks.json`. |
+| `MCP_AUTH_TOKEN` | Optional fallback shared secret, for scripts and scheduled runs that cannot complete an interactive sign-in. Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Leave unset to accept OAuth only. |
 | `KV_REST_API_URL` | REST URL for the Upstash Redis database used to track moves for undo. Set automatically, under this name, when you connect the Upstash integration to this project in Vercel's Storage tab. |
 | `KV_REST_API_TOKEN` | REST token for the same Upstash database. Also set automatically by the Vercel integration. |
 
@@ -37,7 +41,40 @@ Note the deployed URL, e.g. `https://icloud-mcp-yourname.vercel.app`. The MCP en
 
 ### 4. Add as a Claude custom connector
 
-In Claude's connector settings, add a custom connector pointing at `https://<your-deployment>/api/mcp`, with the `MCP_AUTH_TOKEN` value as the bearer token. Test each tool manually before wiring up a scheduled task.
+In Claude's connector settings, add a custom connector pointing at `https://<your-deployment>/api/mcp`. When OAuth is configured, Claude discovers the sign-in step by itself: it gets a 401, reads `/.well-known/oauth-protected-resource`, and sends you to your authorization server to sign in. Leave the bearer token field blank.
+
+If you have kept `MCP_AUTH_TOKEN` set as a fallback, that value still works as a bearer token for anything that cannot do an interactive sign-in.
+
+Test each tool manually before wiring up a scheduled task.
+
+## Authentication
+
+Two separate things are being protected, and they do not use the same mechanism:
+
+- **Your iCloud account** is reached with `ICLOUD_APP_PASSWORD`, an app-specific password from appleid.apple.com. Apple offers no OAuth route into iCloud Mail, Calendar or Reminders, so this stays as it is.
+- **This server's public URL** is protected by OAuth. The server acts as an OAuth 2.1 resource server, as described in the [MCP authorization spec](https://modelcontextprotocol.io/specification/draft/basic/authorization). It validates access tokens but never issues them; signing people in is your authorization server's job.
+
+### Choosing an authorization server
+
+Any provider that issues JWT access tokens and publishes OpenID discovery metadata will work, including Auth0, Clerk, WorkOS, Stytch and Descope. What the provider has to do:
+
+1. Define an API (Auth0 calls this an API, others call it a resource or audience) whose identifier is exactly your MCP URL, e.g. `https://<your-deployment>/api/mcp`. That identifier becomes `OAUTH_AUDIENCE`.
+2. Sign tokens with an asymmetric algorithm (RS256 or ES256) and publish the public keys at `<issuer>/.well-known/jwks.json`. If your provider uses a different path, set `OAUTH_JWKS_URI`.
+3. Allow the client registration that Claude needs. Most MCP clients rely on either OAuth Client ID Metadata Documents or Dynamic Client Registration, so enable whichever your provider supports.
+
+### What the server does on each request
+
+1. No token, or a token it cannot verify, gets a `401` with a `WWW-Authenticate` header naming `/.well-known/oauth-protected-resource`.
+2. That document, served by `api/oauth-protected-resource.ts`, names your authorization server. The client signs you in there and comes back with an access token.
+3. Every later request is checked for signature, issuer, audience and (if set) scope. A valid token missing a required scope gets a `403` naming the scopes needed, so the client can ask for them.
+
+Tokens still travel in the `Authorization: Bearer` header. The change is that they are short-lived and issued after a sign-in, rather than one fixed string pasted into a settings field.
+
+### The shared-secret fallback
+
+`MCP_AUTH_TOKEN` is still accepted, for scheduled runs and scripts that cannot open a browser. Both routes read the same header, so an OAuth check that fails falls through to a constant-time comparison against the secret. Scope checks are not bypassed: a valid OAuth token lacking a required scope is rejected outright rather than falling through.
+
+Leave `MCP_AUTH_TOKEN` unset once nothing needs it, and the fallback disappears.
 
 ## Local testing
 
