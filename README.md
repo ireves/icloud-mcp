@@ -12,7 +12,13 @@ A remote MCP server exposing iCloud Mail, Calendar, and Reminders as tools for C
 
 This password is used for both mail (IMAP) and calendar/reminders (CalDAV). Do not use your main Apple ID password.
 
-### 2. Set environment variables
+### 2. Set up sign-in
+
+Access to this server is protected by OAuth. You sign in through an outside service (Auth0, Clerk, WorkOS, Okta, Keycloak — anything publishing standard OpenID Connect discovery), and this server only checks that the token it receives is genuine. No sign-in screen, password or token store lives in this project.
+
+In that service, create an **API** (some call it a resource or audience) whose identifier is your deployed MCP endpoint, e.g. `https://icloud-mcp-yourname.vercel.app/api/mcp`, and give it a scope named `mcp:access`. Allow dynamic client registration if the service offers it, since that is how Claude registers itself.
+
+### 3. Set environment variables
 
 In the Vercel dashboard, under Project Settings → Environment Variables, set:
 
@@ -20,13 +26,20 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 |---|---|
 | `ICLOUD_EMAIL` | Your iCloud email address |
 | `ICLOUD_APP_PASSWORD` | The app-specific password from step 1 |
-| `MCP_AUTH_TOKEN` | A shared secret this server requires in the `Authorization: Bearer` header. Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
+| `OAUTH_ISSUER` | The sign-in service's base URL, exactly as it appears in the `iss` claim of its tokens |
+| `OAUTH_AUDIENCE` | This server's identifier, as registered in step 2. Tokens must name it |
+| `OAUTH_REQUIRED_SCOPE` | Optional. Scope a token must carry. Defaults to `mcp:access`; set it empty to skip the check |
+| `OAUTH_JWKS_URI` | Optional. Only if signing keys are published somewhere other than `<issuer>/.well-known/jwks.json` |
+| `PUBLIC_BASE_URL` | Optional. Overrides the public URL in the discovery document. Normally worked out from the request |
+| `MCP_AUTH_TOKEN` | Optional, being retired. The original shared secret. While set, it is still accepted alongside OAuth so an existing connector keeps working |
 | `KV_REST_API_URL` | REST URL for the Upstash Redis database used to track moves for undo. Set automatically, under this name, when you connect the Upstash integration to this project in Vercel's Storage tab. |
 | `KV_REST_API_TOKEN` | REST token for the same Upstash database. Also set automatically by the Vercel integration. |
 
+At least one of OAuth (`OAUTH_ISSUER` plus `OAUTH_AUDIENCE`) or `MCP_AUTH_TOKEN` must be set, or the server refuses every request.
+
 See `.env.example` for local development — copy it to `.env` and fill in real values (never commit `.env`).
 
-### 3. Deploy
+### 4. Deploy
 
 ```bash
 npm install
@@ -35,9 +48,22 @@ npx vercel deploy --prod
 
 Note the deployed URL, e.g. `https://icloud-mcp-yourname.vercel.app`. The MCP endpoint is at `/api/mcp`.
 
-### 4. Add as a Claude custom connector
+### 5. Add as a Claude custom connector
 
-In Claude's connector settings, add a custom connector pointing at `https://<your-deployment>/api/mcp`, with the `MCP_AUTH_TOKEN` value as the bearer token. Test each tool manually before wiring up a scheduled task.
+In Claude's connector settings, add a custom connector pointing at `https://<your-deployment>/api/mcp`, and leave the token field empty. Claude will find the sign-in service by itself and open a browser window for you to approve access. Test each tool manually before wiring up a scheduled task.
+
+If you still have a connector using the old shared secret, it keeps working while `MCP_AUTH_TOKEN` remains set. Once the OAuth connector is proven, remove that variable in Vercel and redeploy, which retires the old token for good.
+
+## How sign-in works
+
+The server acts purely as a resource server, in OAuth terms, so it checks tokens but never issues them.
+
+1. Claude calls `/api/mcp` with no token and gets back `401` with a `WWW-Authenticate` header naming the discovery document.
+2. Claude fetches `/.well-known/oauth-protected-resource/api/mcp`, which names the sign-in service and the scope required.
+3. Claude registers itself with that service, sends you to sign in, and receives a short-lived access token.
+4. Every later call carries that token. The server checks the signature against the service's published keys, checks the issuer and audience, and checks the scope, before any tool runs.
+
+Because the token expires and can be revoked at the sign-in service, losing one is far less serious than losing the old shared secret.
 
 ## Local testing
 
