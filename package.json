@@ -11,7 +11,8 @@
     "test": "vitest run",
     "test:imap": "tsx scripts/test-imap.ts",
     "test:caldav": "tsx scripts/test-caldav.ts",
-    "check:oauth": "tsx scripts/check-oauth.ts"
+    "check:oauth": "tsx scripts/check-oauth.ts",
+    "migrate:storage": "tsx scripts/migrate-upstash-to-supabase.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
@@ -28,6 +29,7 @@
     "@types/html-to-text": "^9.0.4",
     "@types/mailparser": "^3.4.4",
     "@types/node": "^22.10.5",
+    "@upstash/redis": "^1.38.4",
     "@vercel/node": "^12.0.1",
     "dotenv": "^16.4.5",
     "tsx": "^4.15.6",

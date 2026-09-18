@@ -203,6 +203,25 @@ The style rules match a whole value rather than the start of one, so small print
 
 Where a message has both a plain-text and an HTML part, the plain-text part is used as before, unless it is very short next to a much longer HTML part. A one-line text part beside a full HTML message is usually a stub, and occasionally a decoy, so the HTML conversion is used instead.
 
+## Moving the stored data from Upstash
+
+Earlier versions kept this server's durable state in Upstash Redis. If you are switching an existing deployment to Supabase, copy the data across before you cut over, using the credentials for both:
+
+```
+npm run migrate:storage             # report what would be copied
+npm run migrate:storage -- --apply  # copy it
+```
+
+The script reads from Upstash and writes to Supabase. It changes nothing in Upstash and can be run more than once, since every write replaces the matching row rather than adding to it.
+
+What it carries over, and why each matters:
+
+- **Scan positions** (`scan_progress`), which record how far each folder has been scanned. These never expire, and losing them means the next `since_last_run` scan starts from the beginning of the folder and re-presents mail you have already sorted. This is the one worth caring about.
+- **Move records from the last 7 days**, so `undo_move` still works for recent moves. Anything already past its 7 days is left behind.
+- **Flagged messages held back** from each folder's last scan, and the listed-UID records that `mark_scanned` is checked against. Both of these repair themselves within a day, so they are copied only for tidiness.
+
+Once a move and an undo work against Supabase, remove the Upstash integration from the project.
+
 ## Recovering from a move
 
 Every `move_message` call is durably logged in Supabase for 7 days, independently of the mail server itself. `undo_move` reverses a logged move, but only after re-verifying that the message is still where it was left: it checks the destination folder's UIDVALIDITY hasn't changed and that the message's identity (Message-ID, date, and subject) still matches what was originally moved, before moving anything back. The same Trash/Junk destination policy applies to undo as to the original move.
