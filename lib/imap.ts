@@ -249,6 +249,33 @@ const MAX_MESSAGE_BYTES = 10 * 1024 * 1024;
 const MAX_BODY_CHARS = 100_000;
 
 /**
+ * Matches an inline style declaration by its whole value, rather than by a
+ * prefix of it. A plain `[style*="font-size:0"]` would also catch
+ * `font-size:0.9em`, which is ordinary visible text, and `[style*="color:
+ * transparent"]` would catch a value that merely begins that way. So each way
+ * a value can legitimately end is spelled out: the end of the attribute, a
+ * semicolon, a space, `!` (as in `!important`), or, for a length, its unit.
+ *
+ * Skipping an element takes its text with it, so a rule that over-matches
+ * loses part of the message. These stay narrow on purpose.
+ */
+function styleValueSelectors(property: string, value: string, units: string[] = []): string[] {
+  const selectors: string[] = [];
+  for (const declaration of [`${property}:${value}`, `${property}: ${value}`]) {
+    selectors.push(
+      `[style$="${declaration}"]`,
+      `[style*="${declaration};"]`,
+      `[style*="${declaration} "]`,
+      `[style*="${declaration}!"]`,
+      ...units.map((unit) => `[style*="${declaration}${unit}"]`),
+    );
+  }
+  return selectors;
+}
+
+const CSS_LENGTH_UNITS = ['px', 'pt', 'em', 'rem', '%', 'ex', 'ch', 'pc', 'in', 'cm', 'mm', 'vw', 'vh'];
+
+/**
  * Parts of an HTML message that a person never sees, and that are therefore
  * a natural place to hide text meant only for whatever reads the message
  * automatically: markup that is not content at all, elements marked hidden,
@@ -265,15 +292,12 @@ const HIDDEN_ELEMENT_SELECTORS = [
   'template',
   '[hidden]',
   '[aria-hidden="true"]',
-  '[style*="display:none"]',
-  '[style*="display: none"]',
-  '[style*="visibility:hidden"]',
-  '[style*="visibility: hidden"]',
-  '[style*="font-size:0"]',
-  '[style*="font-size: 0"]',
-  '[style*="opacity:0"]',
-  '[style*="opacity: 0"]',
-  '[style*="color:transparent"]',
+  ...styleValueSelectors('display', 'none'),
+  ...styleValueSelectors('visibility', 'hidden'),
+  ...styleValueSelectors('font-size', '0', CSS_LENGTH_UNITS),
+  // Opacity is a bare number, so it takes no units at all.
+  ...styleValueSelectors('opacity', '0'),
+  ...styleValueSelectors('color', 'transparent'),
   '.preheader',
   '.preview-text',
 ].map((selector) => ({ selector, format: 'skip' as const }));

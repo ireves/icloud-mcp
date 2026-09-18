@@ -196,6 +196,8 @@ A message can carry text a person never sees: white-on-white or zero-height bloc
 
 `get_message` drops it. HTML is converted with those elements skipped entirely, and invisible characters are removed from the result whichever part the body came from. Calendar descriptions and reminder notes get the same character stripping.
 
+The style rules match a whole value rather than the start of one, so small print survives: `font-size:0` is hidden text and is dropped, while `font-size:0.9em` is just small and is kept.
+
 Where a message has both a plain-text and an HTML part, the plain-text part is used as before, unless it is very short next to a much longer HTML part. A one-line text part beside a full HTML message is usually a stub, and occasionally a decoy, so the HTML conversion is used instead.
 
 ## Recovering from a move
