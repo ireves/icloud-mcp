@@ -168,11 +168,13 @@ The rules are enforced in the server, on every `move_message` and on any `undo_m
 
 ### Giving the server read-only access
 
-1. In Notion, open **Settings → Connections → Develop or manage integrations**, and create a new internal integration.
-2. Under its capabilities, tick **Read content** and nothing else. It never needs to write.
-3. Copy the integration secret and set it as `NOTION_EXCEPTIONS_TOKEN` in Vercel's Project Settings → Environment Variables.
-4. Open the Email Sorting Exceptions database in Notion, use the **`...`** menu → **Connections**, and add your new integration. Share only this database with it.
-5. In that same Connections list, remove the Claude connector from this database. The server reads the rules now, so Claude no longer needs its own access to them.
+You need to be a workspace owner to create a connection.
+
+1. Open Notion's developer portal at [app.notion.com/developers/connections](https://app.notion.com/developers/connections). Under **Build** in the sidebar, choose **Internal connections**, then **Create a new connection**. Name it and pick your workspace.
+2. On the **Configuration** tab, set its capabilities: **Read content** and nothing else. It never needs to write.
+3. Copy the token from that same tab (**Installation access token**, shown as **Internal Integration Secret** in some workspaces) and set it as `NOTION_EXCEPTIONS_TOKEN` in Vercel's Project Settings → Environment Variables.
+4. Give it access to the exceptions database and nothing else: open that database in Notion, use the **•••** menu → **Connections** → **+ Add connection**, and pick your new connection. The **Content access** tab in the developer portal does the same thing.
+5. In that same **Connections** list, remove the Claude connector from this database. The server reads the rules now, so Claude no longer needs its own access to them.
 
 If you keep the rules in a different database, put its data source id in `NOTION_EXCEPTIONS_DATA_SOURCE_ID`; otherwise leave it unset.
 
