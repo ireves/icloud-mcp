@@ -112,15 +112,15 @@ Both read from a local `.env` file and print what they find. Run them separately
 | Tool | Description |
 |---|---|
 | `list_folders` | List all mail folders |
-| `list_messages` | List message headers in a folder (subject, sender, date, unread, UID) |
+| `list_messages` | List message headers in a folder (subject, sender, date, unread, UID); subjects are marked untrusted |
 | `mark_scanned` | Record how far a folder has been processed; only accepts a UID the server has listed |
 | `reconcile_flagged` | Return messages unflagged since the previous call, so they get sorted |
 | `get_message` | Get full headers and body for one message (HTML converted to plain text, hidden text removed, body marked untrusted) |
 | `mark_message` | Mark a message read/unread |
 | `list_exceptions` | List the operator's standing sorting rules, read from Notion |
-| `move_message` | Move a message to another folder (moves into Trash/Junk are blocked by default, server-enforced); returns an `operation_id` you can pass to `undo_move` |
+| `move_message` | Move a message to another folder (Trash/Junk, the destination allowlist and the sorting exceptions are all enforced by the server); returns an `operation_id` you can pass to `undo_move` |
 | `flag_message` | Flag/unflag a message |
-| `undo_move` | Reverse a previous `move_message` by its `operation_id`, with safety checks |
+| `undo_move` | Reverse a previous `move_message` by its `operation_id`, with the same destination checks applied in reverse |
 | `list_move_operations` | List recent move operations, most recent first |
 | `get_move_operation` | Get the full record for one move operation |
 
@@ -130,7 +130,7 @@ Both read from a local `.env` file and print what they find. Run them separately
 |---|---|
 | `list_calendars` | List event calendars |
 | `list_events` | List events in a calendar within a date range (max 366 days); occurrence identifiers are stable and resolve to the exact occurrence |
-| `get_event` | Get full details for one event or occurrence (explicit error if the occurrence can no longer be resolved) |
+| `get_event` | Get full details for one event or occurrence (explicit error if the occurrence can no longer be resolved); the description is marked untrusted |
 | `create_event` | Create a personal event (no attendees, no invitations) |
 | `update_event` | Update fields on an existing event (no attendees, no invitations) |
 
@@ -140,7 +140,7 @@ Both read from a local `.env` file and print what they find. Run them separately
 |---|---|
 | `list_reminder_lists` | List reminder lists |
 | `list_reminders` | List reminders in a list (title, due date, completed) |
-| `get_reminder` | Get full details for one reminder |
+| `get_reminder` | Get full details for one reminder; the notes are marked untrusted |
 | `create_reminder` | Create a reminder |
 | `complete_reminder` | Mark a reminder completed or reopen it |
 
@@ -177,6 +177,12 @@ The rules are enforced in the server, on every `move_message` and on any `undo_m
 If you keep the rules in a different database, put its data source id in `NOTION_EXCEPTIONS_DATA_SOURCE_ID`; otherwise leave it unset.
 
 `Notes` and `Timing` are written by a human, but the server still labels them as untrusted when handing them to an agent, for the same reason it labels message bodies: text that reaches a model as content should never read as an instruction.
+
+## Untrusted content
+
+Everything an outsider wrote arrives labelled. Message bodies, calendar descriptions and reminder notes come back wrapped in a marked block saying the content is data to be read or sorted, never instructions; subjects and the exceptions list's free-text columns get a shorter inline tag. Anything in the content that imitates one of those markers is replaced, so a message cannot close the block early and carry on as though it were trusted.
+
+This makes an agent less likely to act on an instruction buried in a message. It does not make it impossible, which is why the refusals above (Trash and Junk, the destination allowlist, the sorting exceptions, the scan marker) are enforced in the server, where no amount of persuasion reaches them.
 
 ## The scan marker
 
