@@ -16,6 +16,7 @@ import {
   type MoveOperationRecord,
 } from './moveLog.js';
 import { advanceLastSeenUid, getLastSeenUid, getPendingFlaggedUids, setPendingFlaggedUids } from './scanProgress.js';
+import { tagUntrustedInline, wrapUntrusted } from './untrusted.js';
 
 // Network/protocol conditions where the server's actual state is unknown —
 // the command may or may not have taken effect. Everything else (auth
@@ -37,6 +38,12 @@ function requireEnv(name: string): string {
     throw new Error(`${name} is not set`);
   }
   return value;
+}
+
+interface FetchedEnvelope {
+  subject?: string;
+  from?: { address?: string }[];
+  date?: Date;
 }
 
 export interface MailboxListEntry {
@@ -124,6 +131,23 @@ async function extractBody(source: Buffer | undefined): Promise<string> {
   return body;
 }
 
+/**
+ * Builds a list entry from a fetched message. The subject is written by
+ * whoever sent the message, so it carries an inline untrusted tag — a subject
+ * line is a perfectly good place to hide an instruction, and these entries
+ * are what an agent reads when deciding what to do with a message.
+ */
+function toSummary(message: { uid: number; envelope?: FetchedEnvelope; flags?: Set<string> }): MessageSummary {
+  const subject = message.envelope?.subject;
+  return {
+    uid: message.uid,
+    subject: subject ? tagUntrustedInline('EMAIL SUBJECT', subject) : '(no subject)',
+    from: message.envelope?.from?.[0]?.address ?? 'unknown',
+    date: message.envelope?.date ? message.envelope.date.toISOString() : '',
+    unread: !message.flags?.has('\\Seen'),
+  };
+}
+
 export async function listFolders(): Promise<MailboxInfo[]> {
   const client = getClient();
   await client.connect();
@@ -193,13 +217,7 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
         const limited = uids.slice(0, limit);
         const results: MessageSummary[] = [];
         for await (const message of client.fetch(limited, { envelope: true, flags: true, uid: true }, { uid: true })) {
-          results.push({
-            uid: message.uid,
-            subject: message.envelope?.subject ?? '(no subject)',
-            from: message.envelope?.from?.[0]?.address ?? 'unknown',
-            date: message.envelope?.date ? message.envelope.date.toISOString() : '',
-            unread: !message.flags?.has('\\Seen'),
-          });
+          results.push(toSummary(message));
         }
         results.sort((a, b) => a.uid - b.uid);
         const nextCursor = hasMore ? results[results.length - 1]?.uid : undefined;
@@ -215,13 +233,7 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
       const limited = uids.slice(-limit).reverse();
       const results: MessageSummary[] = [];
       for await (const message of client.fetch(limited, { envelope: true, flags: true, uid: true }, { uid: true })) {
-        results.push({
-          uid: message.uid,
-          subject: message.envelope?.subject ?? '(no subject)',
-          from: message.envelope?.from?.[0]?.address ?? 'unknown',
-          date: message.envelope?.date ? message.envelope.date.toISOString() : '',
-          unread: !message.flags?.has('\\Seen'),
-        });
+        results.push(toSummary(message));
       }
       results.sort((a, b) => b.uid - a.uid);
       const nextCursor = hasMore ? results[results.length - 1]?.uid : undefined;
@@ -267,13 +279,11 @@ export async function getMessage(params: GetMessageParams): Promise<MessageDetai
       }
       const body = await extractBody(message.source as Buffer | undefined);
       return {
-        uid: message.uid,
-        subject: message.envelope?.subject ?? '(no subject)',
-        from: message.envelope?.from?.[0]?.address ?? 'unknown',
+        ...toSummary(message),
         to: message.envelope?.to?.map((a) => a.address).filter(Boolean).join(', ') ?? '',
-        date: message.envelope?.date ? message.envelope.date.toISOString() : '',
-        unread: !message.flags?.has('\\Seen'),
-        body,
+        // An empty (or whitespace-only) body is left exactly as it was: a
+        // wrapper around nothing would be noise rather than a warning.
+        body: body.trim() ? wrapUntrusted('EMAIL BODY', body) : body,
       };
     } finally {
       lock.release();
@@ -568,13 +578,7 @@ export async function reconcileFlagged(folder: string): Promise<{ newlyUnflagged
       const newlyUnflagged: MessageSummary[] = [];
       if (newlyUnflaggedUids.length > 0) {
         for await (const message of client.fetch(newlyUnflaggedUids, { envelope: true, flags: true, uid: true }, { uid: true })) {
-          newlyUnflagged.push({
-            uid: message.uid,
-            subject: message.envelope?.subject ?? '(no subject)',
-            from: message.envelope?.from?.[0]?.address ?? 'unknown',
-            date: message.envelope?.date ? message.envelope.date.toISOString() : '',
-            unread: !message.flags?.has('\\Seen'),
-          });
+          newlyUnflagged.push(toSummary(message));
         }
       }
 

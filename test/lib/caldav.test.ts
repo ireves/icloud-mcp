@@ -330,7 +330,10 @@ describe('getEvent occurrence resolution', () => {
     expect(event.title).toBe('Moved occurrence');
     expect(event.start).toBe('2026-09-15T14:00:00.000Z');
     expect(event.location).toBe('Room 2');
-    expect(event.notes).toBe('Moved a day and an hour later');
+    // The description is outside-written, so it comes back inside an untrusted block.
+    expect(event.notes).toContain('<<<BEGIN UNTRUSTED CALENDAR DESCRIPTION');
+    expect(event.notes).toContain('Moved a day and an hour later');
+    expect(event.notes).toContain('<<<END UNTRUSTED CALENDAR DESCRIPTION>>>');
     // Only the direct (non-expand) fetch should have been needed.
     expect(mockClient.fetchCalendarObjects).toHaveBeenCalledTimes(1);
   });

@@ -10,6 +10,7 @@ import type {
   ReminderListInfo,
   ReminderSummary,
 } from './types.js';
+import { wrapUntrusted } from './untrusted.js';
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -281,9 +282,17 @@ function findVeventByRecurrenceId(icsData: string, recurrenceIdIsoTarget: string
   );
 }
 
+/**
+ * The DESCRIPTION of an event can be written by whoever created or shared it,
+ * so it is labelled as untrusted before it reaches an agent.
+ */
+function untrustedNotes(kind: string, raw: string | null | undefined): string | undefined {
+  return raw ? wrapUntrusted(kind, raw) : undefined;
+}
+
 function eventDetailFromVevent(vevent: ICAL.Component, id: string): EventDetail {
   const summary = summarizeVevent(vevent, id);
-  const notes = (vevent.getFirstPropertyValue('description') as string | null) ?? undefined;
+  const notes = untrustedNotes('CALENDAR DESCRIPTION', vevent.getFirstPropertyValue('description') as string | null);
   return { ...summary, notes };
 }
 
@@ -305,7 +314,7 @@ export async function getEvent(params: GetEventParams): Promise<EventDetail> {
     const jcal = ICAL.parse(obj.data);
     const comp = new ICAL.Component(jcal);
     const vevent = comp.getFirstSubcomponent('vevent');
-    const notes = (vevent?.getFirstPropertyValue('description') as string | null) ?? undefined;
+    const notes = untrustedNotes('CALENDAR DESCRIPTION', vevent?.getFirstPropertyValue('description') as string | null);
     return { ...summary, notes };
   }
 
@@ -522,7 +531,7 @@ export async function getReminder(params: GetReminderParams): Promise<ReminderDe
   const jcal = ICAL.parse(obj.data);
   const comp = new ICAL.Component(jcal);
   const vtodo = comp.getFirstSubcomponent('vtodo');
-  const notes = (vtodo?.getFirstPropertyValue('description') as string | null) ?? undefined;
+  const notes = untrustedNotes('REMINDER NOTES', vtodo?.getFirstPropertyValue('description') as string | null);
   return { ...summary, notes };
 }
 
