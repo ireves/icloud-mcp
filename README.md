@@ -113,7 +113,7 @@ Both read from a local `.env` file and print what they find. Run them separately
 |---|---|
 | `list_folders` | List all mail folders |
 | `list_messages` | List message headers in a folder (subject, sender, date, unread, UID) |
-| `get_message` | Get full headers and body for one message (HTML converted to plain text) |
+| `get_message` | Get full headers and body for one message (HTML converted to plain text, hidden text removed, body marked untrusted) |
 | `mark_message` | Mark a message read/unread |
 | `list_exceptions` | List the operator's standing sorting rules, read from Notion |
 | `move_message` | Move a message to another folder (moves into Trash/Junk are blocked by default, server-enforced); returns an `operation_id` you can pass to `undo_move` |
@@ -175,6 +175,14 @@ The rules are enforced in the server, on every `move_message` and on any `undo_m
 If you keep the rules in a different database, put its data source id in `NOTION_EXCEPTIONS_DATA_SOURCE_ID`; otherwise leave it unset.
 
 `Notes` and `Timing` are written by a human, but the server still labels them as untrusted when handing them to an agent, for the same reason it labels message bodies: text that reaches a model as content should never read as an instruction.
+
+## Hidden text in messages
+
+A message can carry text a person never sees: white-on-white or zero-height blocks, a `display:none` div, the preheader that sets the preview line, or invisible characters such as zero-width spaces and the Unicode tag block. None of that is visible in a mail client, but all of it reaches anything reading the message automatically.
+
+`get_message` drops it. HTML is converted with those elements skipped entirely, and invisible characters are removed from the result whichever part the body came from. Calendar descriptions and reminder notes get the same character stripping.
+
+Where a message has both a plain-text and an HTML part, the plain-text part is used as before, unless it is very short next to a much longer HTML part. A one-line text part beside a full HTML message is usually a stub, and occasionally a decoy, so the HTML conversion is used instead.
 
 ## Recovering from a move
 

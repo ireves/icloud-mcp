@@ -10,7 +10,7 @@ import type {
   ReminderListInfo,
   ReminderSummary,
 } from './types.js';
-import { wrapUntrusted } from './untrusted.js';
+import { stripInvisible, wrapUntrusted } from './untrusted.js';
 
 function requireEnv(name: string): string {
   const value = process.env[name];
@@ -287,7 +287,11 @@ function findVeventByRecurrenceId(icsData: string, recurrenceIdIsoTarget: string
  * so it is labelled as untrusted before it reaches an agent.
  */
 function untrustedNotes(kind: string, raw: string | null | undefined): string | undefined {
-  return raw ? wrapUntrusted(kind, raw) : undefined;
+  if (!raw) return undefined;
+  // Invisible characters are stripped here for the same reason as in message
+  // bodies: they can carry text a person reading the entry never sees.
+  const visible = stripInvisible(raw);
+  return visible ? wrapUntrusted(kind, visible) : undefined;
 }
 
 function eventDetailFromVevent(vevent: ICAL.Component, id: string): EventDetail {

@@ -51,3 +51,20 @@ export function tagUntrustedInline(kind: string, text: string): string {
   const flattened = defuseMarkers(text).replace(/\s+/g, ' ').trim();
   return `[untrusted ${kind.toLowerCase()}] ${flattened}`;
 }
+
+/**
+ * Characters that take up no space on screen but are still characters to a
+ * model reading the text: zero-width spaces and joiners, the word joiner and
+ * byte-order mark, the soft hyphen, the Unicode "tag" block (an entire
+ * invisible copy of ASCII), and the bidirectional overrides that can reorder
+ * a line so it reads one way and means another.
+ *
+ * Each of these can carry an instruction past a human who looks at the
+ * message and sees nothing unusual.
+ */
+const INVISIBLE_CHARACTERS = /[​‌‍⁠﻿­‪-‮⁦-⁩\u{E0000}-\u{E007F}]/gu;
+
+/** Removes those characters, leaving everything visible untouched. */
+export function stripInvisible(text: string): string {
+  return text.replace(INVISIBLE_CHARACTERS, '');
+}

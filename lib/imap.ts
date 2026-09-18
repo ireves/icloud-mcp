@@ -16,7 +16,7 @@ import {
   type MoveOperationRecord,
 } from './moveLog.js';
 import { advanceLastSeenUid, getLastSeenUid, getPendingFlaggedUids, setPendingFlaggedUids } from './scanProgress.js';
-import { tagUntrustedInline, wrapUntrusted } from './untrusted.js';
+import { stripInvisible, tagUntrustedInline, wrapUntrusted } from './untrusted.js';
 import { getExceptions, isExceptionsConfigured, matchException, type SortingException } from './exceptions.js';
 
 // Network/protocol conditions where the server's actual state is unknown —
@@ -241,17 +241,78 @@ function getClient(): ImapFlow {
 const MAX_MESSAGE_BYTES = 10 * 1024 * 1024;
 const MAX_BODY_CHARS = 100_000;
 
+/**
+ * Parts of an HTML message that a person never sees, and that are therefore
+ * a natural place to hide text meant only for whatever reads the message
+ * automatically: markup that is not content at all, elements marked hidden,
+ * inline styles that shrink or blank the text, and the "preheader" block that
+ * mail designers use to control the preview line.
+ *
+ * `format: 'skip'` drops the element and everything inside it.
+ */
+const HIDDEN_ELEMENT_SELECTORS = [
+  'script',
+  'style',
+  'head',
+  'noscript',
+  'template',
+  '[hidden]',
+  '[aria-hidden="true"]',
+  '[style*="display:none"]',
+  '[style*="display: none"]',
+  '[style*="visibility:hidden"]',
+  '[style*="visibility: hidden"]',
+  '[style*="font-size:0"]',
+  '[style*="font-size: 0"]',
+  '[style*="opacity:0"]',
+  '[style*="opacity: 0"]',
+  '[style*="color:transparent"]',
+  '.preheader',
+  '.preview-text',
+].map((selector) => ({ selector, format: 'skip' as const }));
+
+function htmlToText(html: string): string {
+  return convert(html, { wordwrap: 100, selectors: HIDDEN_ELEMENT_SELECTORS });
+}
+
+// A text part this short next to a much longer HTML part is usually a stub
+// ("View this email in your browser"), not what the sender expects a person
+// to read — or a decoy hiding what the HTML actually says.
+const SHORT_TEXT_PART_CHARS = 200;
+const MUCH_LONGER_FACTOR = 3;
+
+/** Three or more blank lines in a row become two. */
+function collapseBlankLines(text: string): string {
+  return text.replace(/\n{4,}/g, '\n\n\n');
+}
+
 async function extractBody(source: Buffer | undefined): Promise<string> {
   if (!source) return '';
-  const parsed = await simpleParser(source);
+  // skipHtmlToText stops mailparser inventing a text version of an HTML-only
+  // message with its own converter, which keeps hidden elements. Without it,
+  // `text` would be set for almost every message and the conversion below —
+  // the one that drops hidden content — would rarely run. With it, `text` is
+  // a genuine text/plain part or nothing.
+  const parsed = await simpleParser(source, { skipHtmlToText: true });
+  const text = parsed.text ?? '';
+  const html = typeof parsed.html === 'string' ? parsed.html : '';
+
   let body: string;
-  if (parsed.text) {
-    body = parsed.text;
-  } else if (parsed.html) {
-    body = convert(parsed.html, { wordwrap: 100 });
+  if (text && html && text.length < SHORT_TEXT_PART_CHARS) {
+    const converted = htmlToText(html);
+    const muchLonger =
+      converted.length > Math.max(SHORT_TEXT_PART_CHARS, text.length * MUCH_LONGER_FACTOR);
+    body = muchLonger ? converted : text;
+  } else if (text) {
+    body = text;
+  } else if (html) {
+    body = htmlToText(html);
   } else {
     return '';
   }
+
+  body = collapseBlankLines(stripInvisible(body));
+
   if (body.length > MAX_BODY_CHARS) {
     return `${body.slice(0, MAX_BODY_CHARS)}\n\n[... truncated, message body exceeds ${MAX_BODY_CHARS} characters]`;
   }
