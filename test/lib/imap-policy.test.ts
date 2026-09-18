@@ -95,6 +95,81 @@ describe('assertMoveAllowed', () => {
   });
 });
 
+describe('assertMoveAllowed — the destination allowlist', () => {
+  const INBOX: MailboxListEntry = { path: 'INBOX', name: 'INBOX' };
+  const ARCHIVE: MailboxListEntry = { path: 'Archive', name: 'Archive', specialUse: '\\Archive' };
+  const RECEIPTS: MailboxListEntry = { path: 'Receipts', name: 'Receipts' };
+  const CLIENTS: MailboxListEntry = { path: 'Work/Clients', name: 'Clients' };
+  const PERSONAL: MailboxListEntry = { path: 'Personal', name: 'Personal' };
+  const TRASH: MailboxListEntry = { path: 'Trash', name: 'Trash', specialUse: '\\Trash' };
+  const boxes = [INBOX, ARCHIVE, RECEIPTS, CLIENTS, PERSONAL, TRASH];
+
+  afterEach(() => {
+    delete process.env.ALLOWED_MOVE_DESTINATIONS;
+    delete process.env.ALLOW_TRASH_JUNK_MOVES;
+  });
+
+  it('allows a folder that is on the list', () => {
+    process.env.ALLOWED_MOVE_DESTINATIONS = 'Archive,Receipts,Newsletters,Work/Clients';
+    expect(() => assertMoveAllowed(boxes, 'INBOX', 'Archive')).not.toThrow();
+    expect(() => assertMoveAllowed(boxes, 'INBOX', 'Work/Clients')).not.toThrow();
+  });
+
+  it('refuses a folder that is not on the list, and names the ones that are', () => {
+    process.env.ALLOWED_MOVE_DESTINATIONS = 'Archive,Receipts';
+    expect(() => assertMoveAllowed(boxes, 'INBOX', 'Personal')).toThrow(/not on the operator's allowlist/);
+    expect(() => assertMoveAllowed(boxes, 'INBOX', 'Personal')).toThrow(/Archive, Receipts/);
+  });
+
+  it('says the refusal is server-enforced with no per-call override', () => {
+    process.env.ALLOWED_MOVE_DESTINATIONS = 'Archive';
+    expect(() => assertMoveAllowed(boxes, 'INBOX', 'Personal')).toThrow(
+      /enforced by the server, not the agent, and has no per-call override/,
+    );
+  });
+
+  it('always permits the Inbox as a destination, so recovery and undo keep working', () => {
+    process.env.ALLOWED_MOVE_DESTINATIONS = 'Archive';
+    expect(() => assertMoveAllowed(boxes, 'Archive', 'INBOX')).not.toThrow();
+  });
+
+  it('ignores whitespace around the entries', () => {
+    process.env.ALLOWED_MOVE_DESTINATIONS = ' Archive ,  Receipts ';
+    expect(() => assertMoveAllowed(boxes, 'INBOX', 'Receipts')).not.toThrow();
+  });
+
+  it('allows any ordinary folder when the variable is unset', () => {
+    expect(() => assertMoveAllowed(boxes, 'INBOX', 'Personal')).not.toThrow();
+  });
+
+  it('treats an empty or comma-only value as no list at all', () => {
+    process.env.ALLOWED_MOVE_DESTINATIONS = '  , ,';
+    expect(() => assertMoveAllowed(boxes, 'INBOX', 'Personal')).not.toThrow();
+  });
+
+  it('still blocks Trash when the variable is unset', () => {
+    expect(() => assertMoveAllowed(boxes, 'INBOX', 'Trash')).toThrow(/blocked by default/);
+  });
+
+  it('reports the Trash rule rather than the allowlist when both would refuse', () => {
+    process.env.ALLOWED_MOVE_DESTINATIONS = 'Archive';
+    expect(() => assertMoveAllowed(boxes, 'INBOX', 'Trash')).toThrow(/blocked by default/);
+  });
+
+  it('still applies the allowlist to Trash once the Trash rule itself is lifted', () => {
+    process.env.ALLOWED_MOVE_DESTINATIONS = 'Archive';
+    process.env.ALLOW_TRASH_JUNK_MOVES = 'true';
+    expect(() => assertMoveAllowed(boxes, 'INBOX', 'Trash')).toThrow(/not on the operator's allowlist/);
+  });
+
+  it('applies to a reverse move too, which is how undo_move is checked', () => {
+    process.env.ALLOWED_MOVE_DESTINATIONS = 'Archive';
+    // undoMove calls this with the destination and source swapped.
+    expect(() => assertMoveAllowed(boxes, 'Receipts', 'Personal')).toThrow(/not on the operator's allowlist/);
+    expect(() => assertMoveAllowed(boxes, 'Receipts', 'INBOX')).not.toThrow();
+  });
+});
+
 // --- The operator's sorting exceptions, enforced on moves ---
 
 /** A Notion data-source query response carrying the given rules. */

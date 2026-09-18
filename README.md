@@ -24,6 +24,7 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 | `OAUTH_AUDIENCE` | The canonical URL of this MCP server, e.g. `https://<your-deployment>/api/mcp`. Access tokens are only accepted if they were issued for this audience. Required for OAuth sign-in. |
 | `OAUTH_REQUIRED_SCOPE` | Optional. Space-separated scopes a token must carry, e.g. `icloud:read icloud:write`. When unset, any valid token for this audience is accepted. |
 | `OAUTH_JWKS_URI` | Optional. The signing key address is discovered from the issuer automatically, so this is only needed for a provider that publishes no discovery document. |
+| `ALLOWED_MOVE_DESTINATIONS` | Optional. A comma-separated list of folders a message may be moved into, e.g. `Archive,Receipts,Newsletters,Work/Clients`. `INBOX` is always allowed on top of the list. Leaving it unset allows any folder except Trash and Junk, which is the less safe choice. |
 | `NOTION_EXCEPTIONS_TOKEN` | Optional. A read-only Notion integration secret, used to read the "Email Sorting Exceptions" database. Leave it unset and the feature is off: `list_exceptions` reports that it is not configured, and no exception is enforced on moves. See [Sorting exceptions](#sorting-exceptions). |
 | `NOTION_EXCEPTIONS_DATA_SOURCE_ID` | Optional. The data source to read those rules from. Defaults to `f2ebf247-9368-498f-86a9-3341260874e1`. |
 | `KV_REST_API_URL` | REST URL for the Upstash Redis database used to track moves for undo. Set automatically, under this name, when you connect the Upstash integration to this project in Vercel's Storage tab. |
@@ -146,6 +147,14 @@ Both read from a local `.env` file and print what they find. Run them separately
 `move_message` blocks moves into any folder whose IMAP special-use metadata (or, as a fallback, exact folder name) identifies it as Trash or Junk. This is enforced in the server itself — there is no tool parameter that can override it, and no combination of agent instructions changes it. Moving a message *out of* Trash or Junk (recovery) is always allowed.
 
 To lift the restriction, an operator (not the agent) sets `ALLOW_TRASH_JUNK_MOVES=true` in the deployment's environment variables. Leave it unset for the default, safer behaviour.
+
+### Restricting destinations further
+
+`ALLOWED_MOVE_DESTINATIONS` names the only folders a message may be moved into, as a comma-separated list such as `Archive,Receipts,Newsletters,Work/Clients`. Spaces around the entries are ignored. A move anywhere else is refused, with the allowed folders named in the error.
+
+`INBOX` is always permitted as a destination on top of whatever the list says, so recovering a message and undoing a move keep working. The check applies to `undo_move` as well, in the direction the undo actually moves the message.
+
+Leaving the variable unset allows any folder that is not Trash or Junk. That is the less safe choice: an agent talked into inventing a destination can move mail somewhere you will not think to look. Setting the list is what stops it.
 
 ## Sorting exceptions
 

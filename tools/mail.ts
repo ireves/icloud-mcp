@@ -215,6 +215,7 @@ export function registerMailTools(server: McpServer): void {
       description:
         'Moves a message from one folder to another. Moving into Trash or Junk is blocked by default and enforced by the server (not by this description) — there is no parameter to override it. Moving a message out of Trash or Junk is always allowed. ' +
         "The server also checks the move against the operator's sorting exceptions (see list_exceptions) and refuses one that contradicts them. " +
+        "The operator may also restrict destinations to an allowlist of folders, in which case a move anywhere else is refused. " +
         'On success, returns an operation_id that can be passed to undo_move within 7 days to reverse the move.',
       inputSchema: {
         folder: z.string().describe('Current folder path'),

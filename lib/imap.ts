@@ -76,16 +76,49 @@ function isProhibitedDestination(mailbox: MailboxListEntry): boolean {
   return TRASH_JUNK_NAME_FALLBACK.has(mailbox.name);
 }
 
-export function assertMoveAllowed(
-  mailboxes: MailboxListEntry[],
-  sourcePath: string,
-  targetPath: string,
-): void {
-  if (sourcePath === targetPath) return; // no-op, nothing to validate
-  const target = resolveMailbox(mailboxes, targetPath);
-  if (!target) {
-    throw new Error(`Target folder "${targetPath}" does not exist.`);
-  }
+/** Folder paths are compared forgivingly: the Notion column is typed by hand. */
+function foldersEqual(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+function isInbox(path: string): boolean {
+  return path.trim().toUpperCase() === 'INBOX';
+}
+
+/**
+ * The operator's allowlist of destination folders, or null when they have not
+ * set one. Entries are trimmed, since a comma-separated variable is typed by
+ * hand and "Archive, Receipts" is the obvious way to write it.
+ */
+function allowedDestinations(): string[] | null {
+  const raw = process.env.ALLOWED_MOVE_DESTINATIONS;
+  if (!raw) return null;
+  const entries = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return entries.length > 0 ? entries : null;
+}
+
+/**
+ * Refuses a destination the operator has not listed. The Inbox is always
+ * permitted, whatever the list says, so that recovering a message and undoing
+ * a move keep working.
+ */
+function assertDestinationAllowed(targetPath: string): void {
+  const allowed = allowedDestinations();
+  if (!allowed) return;
+  if (isInbox(targetPath)) return;
+  if (allowed.some((entry) => foldersEqual(entry, targetPath))) return;
+  throw new Error(
+    `Moving messages into "${targetPath}" is refused: it is not on the operator's allowlist of destinations. ` +
+      `Allowed destinations are: ${allowed.join(', ')} (and INBOX). ` +
+      'This check is enforced by the server, not the agent, and has no per-call override.',
+  );
+}
+
+/** The Trash/Junk rule, which takes precedence over the allowlist below. */
+function assertNotTrashOrJunk(target: MailboxListEntry, targetPath: string): void {
   if (!isProhibitedDestination(target)) return;
   // No separate "recovery" exception is needed here: a recovery move (out of
   // Trash/Junk into an ordinary folder) already returns above, since its
@@ -100,13 +133,18 @@ export function assertMoveAllowed(
   );
 }
 
-/** Folder paths are compared forgivingly: the Notion column is typed by hand. */
-function foldersEqual(a: string, b: string): boolean {
-  return a.trim().toLowerCase() === b.trim().toLowerCase();
-}
-
-function isInbox(path: string): boolean {
-  return path.trim().toUpperCase() === 'INBOX';
+export function assertMoveAllowed(
+  mailboxes: MailboxListEntry[],
+  sourcePath: string,
+  targetPath: string,
+): void {
+  if (sourcePath === targetPath) return; // no-op, nothing to validate
+  const target = resolveMailbox(mailboxes, targetPath);
+  if (!target) {
+    throw new Error(`Target folder "${targetPath}" does not exist.`);
+  }
+  assertNotTrashOrJunk(target, targetPath);
+  assertDestinationAllowed(targetPath);
 }
 
 /**
