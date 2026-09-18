@@ -139,6 +139,13 @@ describe('authenticate — OAuth tokens', () => {
     const result = await authenticate(undefined);
     expect(result).toMatchObject({ ok: false, reason: 'missing_token', status: 401 });
   });
+
+  it('does not accept a leftover shared secret as a bearer token', async () => {
+    process.env.MCP_AUTH_TOKEN = 'a-long-random-shared-secret';
+    const result = await authenticate('Bearer a-long-random-shared-secret');
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_token' });
+    delete process.env.MCP_AUTH_TOKEN;
+  });
 });
 
 describe('authenticate — scopes', () => {
@@ -170,45 +177,36 @@ describe('authenticate — scopes', () => {
   });
 });
 
-describe('authenticate — shared secret fallback', () => {
-  it('accepts the shared secret when OAuth verification fails', async () => {
+describe('authenticate — with no OAuth configured', () => {
+  beforeEach(() => {
+    delete process.env.OAUTH_ISSUER;
+    delete process.env.OAUTH_AUDIENCE;
+  });
+
+  it('rejects every request rather than running open', async () => {
+    const result = await authenticate('Bearer anything-at-all');
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_token', status: 401 });
+  });
+
+  it('rejects a request with no token too', async () => {
+    const result = await authenticate(undefined);
+    expect(result).toMatchObject({ ok: false, status: 401 });
+  });
+
+  it('logs that the issuer and audience are what is missing', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await authenticate('Bearer anything-at-all');
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('OAUTH_ISSUER'));
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('OAUTH_AUDIENCE'));
+    error.mockRestore();
+  });
+
+  it('rejects even when a leftover MCP_AUTH_TOKEN is still set in the environment', async () => {
+    // The shared-secret route is gone; an old value lying around unlocks nothing.
     process.env.MCP_AUTH_TOKEN = 'a-long-random-shared-secret';
     const result = await authenticate('Bearer a-long-random-shared-secret');
-    expect(result).toMatchObject({ ok: true, method: 'shared_secret', subject: null });
-  });
-
-  it('works with OAuth switched off entirely', async () => {
-    delete process.env.OAUTH_ISSUER;
-    delete process.env.OAUTH_AUDIENCE;
-    process.env.MCP_AUTH_TOKEN = 'a-long-random-shared-secret';
-
-    const ok = await authenticate('Bearer a-long-random-shared-secret');
-    expect(ok).toMatchObject({ ok: true, method: 'shared_secret' });
-
-    const bad = await authenticate('Bearer nope');
-    expect(bad).toMatchObject({ ok: false, reason: 'invalid_token' });
-  });
-
-  it('rejects a wrong secret of the same length', async () => {
-    process.env.MCP_AUTH_TOKEN = 'aaaaaaaaaaaaaaaa';
-    const result = await authenticate('Bearer bbbbbbbbbbbbbbbb');
     expect(result).toMatchObject({ ok: false, reason: 'invalid_token' });
-  });
-
-  it('still rejects a valid OAuth token that lacks a required scope', async () => {
-    // The fallback must not become a way around scope checks.
-    process.env.OAUTH_REQUIRED_SCOPE = 'icloud:write';
-    process.env.MCP_AUTH_TOKEN = 'a-long-random-shared-secret';
-
-    const token = await signToken({ scope: 'icloud:read' });
-    const result = await authenticate(`Bearer ${token}`);
-    expect(result).toMatchObject({ ok: false, reason: 'insufficient_scope' });
-  });
-
-  it('throws when neither route is configured', async () => {
-    delete process.env.OAUTH_ISSUER;
-    delete process.env.OAUTH_AUDIENCE;
-    await expect(authenticate('Bearer anything')).rejects.toThrow(/No authentication is configured/);
+    delete process.env.MCP_AUTH_TOKEN;
   });
 });
 

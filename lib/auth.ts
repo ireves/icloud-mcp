@@ -1,19 +1,18 @@
-import { timingSafeEqual } from 'node:crypto';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose';
 
 /**
- * Access control for the public MCP endpoint. Two routes are accepted:
+ * Access control for the public MCP endpoint.
  *
- *  1. An OAuth 2.1 access token issued by the authorization server named in
- *     OAUTH_ISSUER. This is the route MCP clients use; the server acts as a
- *     resource server per the MCP authorization spec and validates the token
- *     signature, issuer, audience and scope on every request.
- *  2. The legacy MCP_AUTH_TOKEN shared secret, kept as a fallback for scripts
- *     and scheduled runs that cannot complete an interactive sign-in.
+ * One route is accepted: an OAuth 2.1 access token issued by the
+ * authorization server named in OAUTH_ISSUER. The server acts as a resource
+ * server per the MCP authorization spec, validating the token's signature,
+ * issuer, audience and scope on every request.
  *
- * Both arrive in the same `Authorization: Bearer <token>` header, so an OAuth
- * verification failure falls through to the shared-secret comparison rather
- * than rejecting outright.
+ * There is deliberately no shared-secret alternative. One long-lived string
+ * that unlocks every tool is exactly what an attacker who reads it once needs,
+ * and it cannot be scoped, attributed to a person, or expired. A caller that
+ * cannot complete an interactive sign-in should use a token issued to it by
+ * the authorization server instead.
  */
 
 export type AuthFailureReason = 'missing_token' | 'invalid_token' | 'insufficient_scope';
@@ -21,8 +20,8 @@ export type AuthFailureReason = 'missing_token' | 'invalid_token' | 'insufficien
 export interface AuthSuccess {
   ok: true;
   /** How the caller proved itself, for logging and for tests. */
-  method: 'oauth' | 'shared_secret';
-  /** The `sub` claim of an OAuth token; null for the shared secret. */
+  method: 'oauth';
+  /** The `sub` claim of the token, when it carries one. */
   subject: string | null;
   scopes: string[];
 }
@@ -46,10 +45,6 @@ function optionalEnv(name: string): string | undefined {
 
 export function isOAuthConfigured(): boolean {
   return Boolean(optionalEnv('OAUTH_ISSUER') && optionalEnv('OAUTH_AUDIENCE'));
-}
-
-export function isSharedSecretConfigured(): boolean {
-  return Boolean(optionalEnv('MCP_AUTH_TOKEN'));
 }
 
 /**
@@ -210,27 +205,23 @@ function scopesFrom(payload: JWTPayload): string[] {
   return [];
 }
 
-function matchesSharedSecret(provided: string): boolean {
-  const expected = optionalEnv('MCP_AUTH_TOKEN');
-  if (!expected) {
-    return false;
-  }
-
-  const expectedBuf = Buffer.from(expected);
-  const providedBuf = Buffer.from(provided);
-
-  if (expectedBuf.length !== providedBuf.length) {
-    return false;
-  }
-
-  return timingSafeEqual(expectedBuf, providedBuf);
-}
-
 export async function authenticate(
   authHeader: string | string[] | undefined,
 ): Promise<AuthResult> {
-  if (!isOAuthConfigured() && !isSharedSecretConfigured()) {
-    throw new Error('No authentication is configured: set OAUTH_ISSUER and OAUTH_AUDIENCE, or MCP_AUTH_TOKEN');
+  // Nothing configured means nothing can be verified. The endpoint is public,
+  // so it refuses everything rather than serving an unauthenticated caller.
+  if (!isOAuthConfigured()) {
+    console.error(
+      'MCP authentication is not configured: set OAUTH_ISSUER and OAUTH_AUDIENCE. ' +
+        'Every request is rejected until they are set.',
+    );
+    return {
+      ok: false,
+      reason: 'invalid_token',
+      status: 401,
+      detail: 'OAuth is not configured on this deployment',
+      requiredScopes: [],
+    };
   }
 
   const token = extractBearer(authHeader);
@@ -244,58 +235,47 @@ export async function authenticate(
     };
   }
 
-  let oauthDetail = 'OAuth is not configured';
+  try {
+    const { metadata, keys } = await authServer();
+    const { payload } = await jwtVerify(token, keys, {
+      // The issuer exactly as the provider publishes it, not as it was typed
+      // into the environment.
+      issuer: metadata.issuer,
+      // Binds the token to this server. Without it, a token minted for a
+      // different resource behind the same issuer would be accepted here.
+      audience: resourceIdentifier(),
+    });
 
-  if (isOAuthConfigured()) {
-    try {
-      const { metadata, keys } = await authServer();
-      const { payload } = await jwtVerify(token, keys, {
-        // The issuer exactly as the provider publishes it, not as it was typed
-        // into the environment.
-        issuer: metadata.issuer,
-        // Binds the token to this server. Without it, a token minted for a
-        // different resource behind the same issuer would be accepted here.
-        audience: resourceIdentifier(),
-      });
+    const granted = scopesFrom(payload);
+    const needed = requiredScopes();
+    const missing = needed.filter((scope) => !granted.includes(scope));
 
-      const granted = scopesFrom(payload);
-      const needed = requiredScopes();
-      const missing = needed.filter((scope) => !granted.includes(scope));
-
-      if (missing.length > 0) {
-        return {
-          ok: false,
-          reason: 'insufficient_scope',
-          status: 403,
-          detail: `Token is missing scope: ${missing.join(' ')}`,
-          requiredScopes: needed,
-        };
-      }
-
+    if (missing.length > 0) {
       return {
-        ok: true,
-        method: 'oauth',
-        subject: typeof payload.sub === 'string' ? payload.sub : null,
-        scopes: granted,
+        ok: false,
+        reason: 'insufficient_scope',
+        status: 403,
+        detail: `Token is missing scope: ${missing.join(' ')}`,
+        requiredScopes: needed,
       };
-    } catch (error) {
-      // Not a valid token for this issuer. It may still be the shared secret,
-      // so record why and fall through instead of returning.
-      oauthDetail = error instanceof Error ? error.message : 'Token verification failed';
     }
-  }
 
-  if (matchesSharedSecret(token)) {
-    return { ok: true, method: 'shared_secret', subject: null, scopes: [] };
+    return {
+      ok: true,
+      method: 'oauth',
+      subject: typeof payload.sub === 'string' ? payload.sub : null,
+      scopes: granted,
+    };
+  } catch (error) {
+    // Not a valid token for this issuer, and there is nothing else to try.
+    return {
+      ok: false,
+      reason: 'invalid_token',
+      status: 401,
+      detail: error instanceof Error ? error.message : 'Token verification failed',
+      requiredScopes: requiredScopes(),
+    };
   }
-
-  return {
-    ok: false,
-    reason: 'invalid_token',
-    status: 401,
-    detail: oauthDetail,
-    requiredScopes: requiredScopes(),
-  };
 }
 
 /**

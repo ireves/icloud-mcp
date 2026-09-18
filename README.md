@@ -24,7 +24,6 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 | `OAUTH_AUDIENCE` | The canonical URL of this MCP server, e.g. `https://<your-deployment>/api/mcp`. Access tokens are only accepted if they were issued for this audience. Required for OAuth sign-in. |
 | `OAUTH_REQUIRED_SCOPE` | Optional. Space-separated scopes a token must carry, e.g. `icloud:read icloud:write`. When unset, any valid token for this audience is accepted. |
 | `OAUTH_JWKS_URI` | Optional. The signing key address is discovered from the issuer automatically, so this is only needed for a provider that publishes no discovery document. |
-| `MCP_AUTH_TOKEN` | Optional fallback shared secret, for scripts and scheduled runs that cannot complete an interactive sign-in. Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Leave unset to accept OAuth only. |
 | `NOTION_EXCEPTIONS_TOKEN` | Optional. A read-only Notion integration secret, used to read the "Email Sorting Exceptions" database. Leave it unset and the feature is off: `list_exceptions` reports that it is not configured, and no exception is enforced on moves. See [Sorting exceptions](#sorting-exceptions). |
 | `NOTION_EXCEPTIONS_DATA_SOURCE_ID` | Optional. The data source to read those rules from. Defaults to `f2ebf247-9368-498f-86a9-3341260874e1`. |
 | `KV_REST_API_URL` | REST URL for the Upstash Redis database used to track moves for undo. Set automatically, under this name, when you connect the Upstash integration to this project in Vercel's Storage tab. |
@@ -43,9 +42,9 @@ Note the deployed URL, e.g. `https://icloud-mcp-yourname.vercel.app`. The MCP en
 
 ### 4. Add as a Claude custom connector
 
-In Claude's connector settings, add a custom connector pointing at `https://<your-deployment>/api/mcp`. When OAuth is configured, Claude discovers the sign-in step by itself: it gets a 401, reads `/.well-known/oauth-protected-resource`, and sends you to your authorization server to sign in. Leave the bearer token field blank.
+In Claude's connector settings, add a custom connector pointing at `https://<your-deployment>/api/mcp`. Claude discovers the sign-in step by itself: it gets a 401, reads `/.well-known/oauth-protected-resource`, and sends you to your authorization server to sign in. Leave the bearer token field blank.
 
-If you have kept `MCP_AUTH_TOKEN` set as a fallback, that value still works as a bearer token for anything that cannot do an interactive sign-in.
+OAuth is the only way in. Until `OAUTH_ISSUER` and `OAUTH_AUDIENCE` are both set, the server rejects every request rather than running unprotected, so set them before you deploy.
 
 Test each tool manually before wiring up a scheduled task.
 
@@ -54,7 +53,7 @@ Test each tool manually before wiring up a scheduled task.
 Two separate things are being protected, and they do not use the same mechanism:
 
 - **Your iCloud account** is reached with `ICLOUD_APP_PASSWORD`, an app-specific password from appleid.apple.com. Apple offers no OAuth route into iCloud Mail, Calendar or Reminders, so this stays as it is.
-- **This server's public URL** is protected by OAuth. The server acts as an OAuth 2.1 resource server, as described in the [MCP authorization spec](https://modelcontextprotocol.io/specification/draft/basic/authorization). It validates access tokens but never issues them; signing people in is your authorization server's job.
+- **This server's public URL** is protected by OAuth, and by nothing else. The server acts as an OAuth 2.1 resource server, as described in the [MCP authorization spec](https://modelcontextprotocol.io/specification/draft/basic/authorization). It validates access tokens but never issues them; signing people in is your authorization server's job.
 
 ### Choosing an authorization server
 
@@ -88,11 +87,11 @@ npm run check:oauth -- <access-token>  # also checks a real token end to end
 
 It reports what clients will discover, whether the signing keys are reachable, and, given a token, whether the audience lines up. The audience mismatch above is the most common cause of a connector that signs in and then fails.
 
-### The shared-secret fallback
+### No shared secret
 
-`MCP_AUTH_TOKEN` is still accepted, for scheduled runs and scripts that cannot open a browser. Both routes read the same header, so an OAuth check that fails falls through to a constant-time comparison against the secret. Scope checks are not bypassed: a valid OAuth token lacking a required scope is rejected outright rather than falling through.
+There is no `MCP_AUTH_TOKEN` and no other fixed-string route in. A single long-lived secret that unlocks every tool cannot be scoped to a subset of them, attributed to whoever used it, or expired after a leak, and anything that reads it once has the whole mailbox. If you set that variable in an earlier version, delete it from Vercel; it now unlocks nothing.
 
-Leave `MCP_AUTH_TOKEN` unset once nothing needs it, and the fallback disappears.
+Anything that cannot open a browser, a scheduled run included, needs a token from your authorization server instead. Most providers issue one to a machine caller directly, usually under a name like "machine to machine" or "client credentials".
 
 ## Local testing
 
