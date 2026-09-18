@@ -1,5 +1,34 @@
-import { describe, expect, it, afterEach } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { assertMoveAllowed, type MailboxListEntry } from '../../lib/imap.js';
+import { createMockImapClient, type MockImapClient } from './imap-mock-client.js';
+
+// One mock client instance, shared across module resets so assertions can
+// still reach it after a fresh import of lib/imap.js.
+const holder = vi.hoisted(() => ({ client: undefined as unknown }));
+
+vi.mock('imapflow', async () => {
+  const { createMockImapClient: create } = await import('./imap-mock-client.js');
+  if (!holder.client) holder.client = create();
+  return {
+    ImapFlow: vi.fn().mockImplementation(function ImapFlowMock() {
+      return holder.client;
+    }),
+  };
+});
+
+const mockMoveLog = vi.hoisted(() => ({
+  createPendingOperation: vi.fn(async () => 'op-1'),
+  markConfirmed: vi.fn(),
+  markFailed: vi.fn(),
+  markUncertain: vi.fn(),
+}));
+
+vi.mock('../../lib/moveLog.js', () => mockMoveLog);
+
+function client(): MockImapClient {
+  if (!holder.client) holder.client = createMockImapClient();
+  return holder.client as MockImapClient;
+}
 
 const INBOX: MailboxListEntry = { path: 'INBOX', name: 'INBOX' };
 const TRASH_BY_FLAG: MailboxListEntry = { path: 'INBOX.Trash', name: 'Trash', specialUse: '\\Trash' };
@@ -63,5 +92,199 @@ describe('assertMoveAllowed', () => {
   it('still blocks when ALLOW_TRASH_JUNK_MOVES is set to anything other than the string "true"', () => {
     process.env.ALLOW_TRASH_JUNK_MOVES = '1';
     expect(() => assertMoveAllowed(mailboxes, 'INBOX', 'INBOX.Trash')).toThrow(/blocked by default/);
+  });
+});
+
+// --- The operator's sorting exceptions, enforced on moves ---
+
+/** A Notion data-source query response carrying the given rules. */
+function notionRows(rows: { sender: string; action: string; destination?: string }[]) {
+  return {
+    results: rows.map((row, index) => ({
+      id: `row-${index}`,
+      properties: {
+        Sender: { title: [{ plain_text: row.sender }] },
+        Action: { select: { name: row.action } },
+        'Destination Folder': { rich_text: row.destination ? [{ plain_text: row.destination }] : [] },
+        Notes: { rich_text: [] },
+        Timing: { rich_text: [] },
+      },
+    })),
+    has_more: false,
+    next_cursor: null,
+  };
+}
+
+function stubNotionRows(rows: { sender: string; action: string; destination?: string }[]) {
+  const fetchMock = vi.fn(async () =>
+    new Response(JSON.stringify(notionRows(rows)), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }),
+  );
+  vi.stubGlobal('fetch', fetchMock);
+  return fetchMock;
+}
+
+/** Reloads lib/imap.js with a clean mock client, so each test starts fresh. */
+async function freshImap(from = { address: 'accounts@example.com', name: 'The Bank' }) {
+  vi.resetModules();
+  const c = client();
+  for (const value of Object.values(c)) {
+    if (typeof value === 'function' && 'mockReset' in value) (value as ReturnType<typeof vi.fn>).mockReset();
+  }
+  for (const fn of Object.values(mockMoveLog)) (fn as ReturnType<typeof vi.fn>).mockReset();
+  mockMoveLog.createPendingOperation.mockResolvedValue('op-1');
+
+  c.getMailboxLock.mockImplementation(async () => ({ release: vi.fn() }));
+  c.mailbox = { uidValidity: 1000n };
+  c.fetchOne.mockResolvedValue({
+    envelope: {
+      messageId: '<abc@example.com>',
+      date: new Date('2026-09-01T00:00:00.000Z'),
+      subject: 'Hello',
+      from: [from],
+    },
+  });
+  c.messageMove.mockResolvedValue({
+    path: 'INBOX',
+    destination: 'Archive',
+    uidValidity: 2000n,
+    uidMap: new Map([[1, 99]]),
+  });
+  c.list.mockResolvedValue([
+    { path: 'INBOX', name: 'INBOX' },
+    { path: 'Archive', name: 'Archive', specialUse: '\\Archive' },
+    { path: 'Receipts', name: 'Receipts' },
+  ]);
+
+  process.env.ICLOUD_EMAIL = 'test@icloud.com';
+  process.env.ICLOUD_APP_PASSWORD = 'app-specific-password';
+  process.env.NOTION_EXCEPTIONS_TOKEN = 'secret_test_token';
+  delete process.env.ALLOW_TRASH_JUNK_MOVES;
+  return import('../../lib/imap.js');
+}
+
+describe('moveMessage — the operator exceptions list', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.NOTION_EXCEPTIONS_TOKEN;
+  });
+
+  it('refuses to move a keep-in-inbox sender out of the Inbox', async () => {
+    const imap = await freshImap();
+    stubNotionRows([{ sender: 'accounts@example.com', action: 'Keep in Inbox' }]);
+
+    await expect(imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Archive' })).rejects.toThrow(
+      /stays in the Inbox/,
+    );
+    expect(client().messageMove).not.toHaveBeenCalled();
+  });
+
+  it('says plainly that the refusal is the server\'s and cannot be overridden', async () => {
+    const imap = await freshImap();
+    stubNotionRows([{ sender: 'accounts@example.com', action: 'Keep in Inbox' }]);
+
+    await expect(imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Archive' })).rejects.toThrow(
+      /enforced by the server and cannot be overridden by the caller/,
+    );
+  });
+
+  it('applies a keep-in-inbox rule matched by domain', async () => {
+    const imap = await freshImap();
+    stubNotionRows([{ sender: 'example.com', action: 'Keep in Inbox' }]);
+
+    await expect(imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Archive' })).rejects.toThrow(
+      /stays in the Inbox/,
+    );
+  });
+
+  it('applies a keep-in-inbox rule matched by display name', async () => {
+    const imap = await freshImap({ address: 'noreply@unknown.example', name: 'The Bank' });
+    stubNotionRows([{ sender: 'the bank', action: 'Keep in Inbox' }]);
+
+    await expect(imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Archive' })).rejects.toThrow(
+      /stays in the Inbox/,
+    );
+  });
+
+  it('allows moving a keep-in-inbox sender between other folders, since the rule is about the Inbox', async () => {
+    const imap = await freshImap();
+    stubNotionRows([{ sender: 'accounts@example.com', action: 'Keep in Inbox' }]);
+
+    await imap.moveMessage({ folder: 'Archive', uid: 1, targetFolder: 'Receipts' });
+    expect(client().messageMove).toHaveBeenCalledWith('1', 'Receipts', { uid: true });
+  });
+
+  it('refuses a move to any folder other than the one the rule names', async () => {
+    const imap = await freshImap();
+    stubNotionRows([{ sender: 'accounts@example.com', action: 'Move to Folder', destination: 'Receipts' }]);
+
+    await expect(imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Archive' })).rejects.toThrow(
+      /belongs in "Receipts", not "Archive"/,
+    );
+    expect(client().messageMove).not.toHaveBeenCalled();
+  });
+
+  it('allows the move the rule names', async () => {
+    const imap = await freshImap();
+    stubNotionRows([{ sender: 'accounts@example.com', action: 'Move to Folder', destination: 'Receipts' }]);
+
+    await imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Receipts' });
+    expect(client().messageMove).toHaveBeenCalledWith('1', 'Receipts', { uid: true });
+  });
+
+  it('matches the rule\'s folder regardless of case or stray spaces', async () => {
+    const imap = await freshImap();
+    stubNotionRows([{ sender: 'accounts@example.com', action: 'Move to Folder', destination: ' receipts ' }]);
+
+    await imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Receipts' });
+    expect(client().messageMove).toHaveBeenCalled();
+  });
+
+  it('leaves a sender with no rule alone', async () => {
+    const imap = await freshImap({ address: 'stranger@nowhere.example', name: 'Nobody' });
+    stubNotionRows([{ sender: 'accounts@example.com', action: 'Keep in Inbox' }]);
+
+    await imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Archive' });
+    expect(client().messageMove).toHaveBeenCalledWith('1', 'Archive', { uid: true });
+  });
+
+  it('skips the check entirely, and never calls Notion, when no token is configured', async () => {
+    const imap = await freshImap();
+    delete process.env.NOTION_EXCEPTIONS_TOKEN;
+    const fetchMock = stubNotionRows([{ sender: 'accounts@example.com', action: 'Keep in Inbox' }]);
+
+    await imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Archive' });
+    expect(client().messageMove).toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('refuses the move when the exceptions list cannot be read, rather than waving it through', async () => {
+    const imap = await freshImap();
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
+
+    await expect(imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Archive' })).rejects.toThrow(
+      /could not be read/,
+    );
+    expect(client().messageMove).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a Trash move before it ever looks at the exceptions list', async () => {
+    const imap = await freshImap();
+    client().list.mockResolvedValue([
+      { path: 'INBOX', name: 'INBOX' },
+      { path: 'Trash', name: 'Trash', specialUse: '\\Trash' },
+    ]);
+    const fetchMock = stubNotionRows([]);
+
+    await expect(imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Trash' })).rejects.toThrow(
+      /blocked by default/,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

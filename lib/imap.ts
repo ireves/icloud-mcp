@@ -17,6 +17,7 @@ import {
 } from './moveLog.js';
 import { advanceLastSeenUid, getLastSeenUid, getPendingFlaggedUids, setPendingFlaggedUids } from './scanProgress.js';
 import { tagUntrustedInline, wrapUntrusted } from './untrusted.js';
+import { getExceptions, isExceptionsConfigured, matchException, type SortingException } from './exceptions.js';
 
 // Network/protocol conditions where the server's actual state is unknown —
 // the command may or may not have taken effect. Everything else (auth
@@ -96,6 +97,94 @@ export function assertMoveAllowed(
     `Moving messages into "${targetPath}" is blocked by default because it is a Trash or Junk folder. ` +
       `This restriction is enforced by the server, not the agent, and has no per-call override. ` +
       `An operator can lift it by setting ALLOW_TRASH_JUNK_MOVES=true in the deployment's environment.`,
+  );
+}
+
+/** Folder paths are compared forgivingly: the Notion column is typed by hand. */
+function foldersEqual(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+function isInbox(path: string): boolean {
+  return path.trim().toUpperCase() === 'INBOX';
+}
+
+/**
+ * The operator's standing sorting rules, or null when the feature is switched
+ * off. A read that fails refuses the move rather than waving it through: a
+ * rule that silently stops applying when Notion is unreachable would not be
+ * much of a rule.
+ */
+async function loadExceptions(): Promise<SortingException[] | null> {
+  if (!isExceptionsConfigured()) return null;
+  try {
+    return await getExceptions();
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Move refused: the operator's exceptions list could not be read, so this move cannot be checked against it. ${detail}`,
+    );
+  }
+}
+
+/** The From address and display name of one message, for rule matching. */
+async function fetchSender(
+  client: ImapFlow,
+  folder: string,
+  uid: number,
+): Promise<{ address: string | null; name: string | null }> {
+  const lock = await client.getMailboxLock(folder);
+  try {
+    const meta = await client.fetchOne(String(uid), { envelope: true }, { uid: true });
+    const from = meta && meta.envelope ? meta.envelope.from?.[0] : undefined;
+    return { address: from?.address ?? null, name: from?.name ?? null };
+  } finally {
+    lock.release();
+  }
+}
+
+function assertExceptionAllowsMove(
+  match: SortingException | null,
+  sourcePath: string,
+  targetPath: string,
+): void {
+  if (!match) return;
+
+  if (match.action === 'keep_in_inbox' && isInbox(sourcePath)) {
+    throw new Error(
+      `Move refused: the operator's exceptions list says mail from "${match.sender}" stays in the Inbox. ` +
+        'This is enforced by the server and cannot be overridden by the caller.',
+    );
+  }
+
+  if (
+    match.action === 'move_to_folder' &&
+    match.destinationFolder &&
+    !foldersEqual(match.destinationFolder, targetPath)
+  ) {
+    throw new Error(
+      `Move refused: the operator's exceptions list says mail from "${match.sender}" belongs in ` +
+        `"${match.destinationFolder}", not "${targetPath}". ` +
+        'This is enforced by the server and cannot be overridden by the caller.',
+    );
+  }
+}
+
+/**
+ * Checks a pending move against the operator's exceptions list, reading the
+ * message's sender first. Does nothing when the feature is switched off.
+ */
+async function assertExceptionsAllowMove(
+  client: ImapFlow,
+  args: { sourcePath: string; uid: number; targetPath: string },
+): Promise<void> {
+  const exceptions = await loadExceptions();
+  if (!exceptions) return;
+  const sender = await fetchSender(client, args.sourcePath, args.uid);
+  assertExceptionAllowsMove(
+    matchException(exceptions, sender.address, sender.name),
+    args.sourcePath,
+    args.targetPath,
   );
 }
 
@@ -401,6 +490,11 @@ export async function moveMessage(params: MoveMessageParams): Promise<MoveMessag
     if (params.folder === params.targetFolder) {
       return { operationId: null }; // explicit no-op, nothing to log or undo
     }
+    await assertExceptionsAllowMove(client, {
+      sourcePath: params.folder,
+      uid: params.uid,
+      targetPath: params.targetFolder,
+    });
     const { operationId } = await executeLoggedMove(client, {
       sourcePath: params.folder,
       uid: params.uid,
@@ -518,6 +612,24 @@ export async function undoMove(operationId: string): Promise<{ newOperationId: s
         throw new Error(
           `Cannot undo move operation ${operationId}: the message at the recorded destination UID no longer matches what was originally moved.`,
         );
+      }
+
+      // An undo only needs checking against the exceptions list when it would
+      // take a message back out of the Inbox. Undoing *into* the Inbox is
+      // always fine — that is where a keep_in_inbox rule wants it anyway.
+      if (isInbox(effectiveRecord.destPath)) {
+        const exceptions = await loadExceptions();
+        if (exceptions) {
+          const from = destMeta.envelope?.from?.[0];
+          const match = matchException(exceptions, from?.address ?? null, from?.name ?? null);
+          if (match && match.action === 'keep_in_inbox') {
+            throw new Error(
+              `Undo refused: the operator's exceptions list says mail from "${match.sender}" stays in the Inbox, ` +
+                `and undoing operation ${operationId} would move it out. ` +
+                'This is enforced by the server and cannot be overridden by the caller.',
+            );
+          }
+        }
       }
 
       const { operationId: newOperationId } = await executeLoggedMove(client, {

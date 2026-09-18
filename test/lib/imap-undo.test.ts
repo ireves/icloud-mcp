@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mockClient = vi.hoisted(() => ({
   connect: vi.fn(),
@@ -205,6 +205,113 @@ describe('undoMove', () => {
     mockMoveLog.getOperation.mockResolvedValue(null);
     await expect(imap.undoMove('op-1')).rejects.toThrow();
     expect(mockMoveLog.releaseUndoLock).toHaveBeenCalledWith('op-1');
+  });
+});
+
+describe('undoMove — the operator exceptions list', () => {
+  function stubKeepInInbox(sender: string) {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            results: [
+              {
+                id: 'row-0',
+                properties: {
+                  Sender: { title: [{ plain_text: sender }] },
+                  Action: { select: { name: 'Keep in Inbox' } },
+                  'Destination Folder': { rich_text: [] },
+                  Notes: { rich_text: [] },
+                  Timing: { rich_text: [] },
+                },
+              },
+            ],
+            has_more: false,
+            next_cursor: null,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
+  /** A message sitting in the Inbox after a Receipts -> INBOX move. */
+  function envelopeInInbox() {
+    return {
+      envelope: {
+        messageId: '<abc@example.com>',
+        date: new Date('2026-09-01T00:00:00.000Z'),
+        subject: 'Hello',
+        from: [{ address: 'accounts@example.com', name: 'The Bank' }],
+      },
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    process.env.NOTION_EXCEPTIONS_TOKEN = 'secret_test_token';
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.NOTION_EXCEPTIONS_TOKEN;
+  });
+
+  it('refuses an undo that would take a keep-in-inbox message back out of the Inbox', async () => {
+    const imap = await freshImap();
+    // The original move was Receipts -> INBOX, so undoing it means INBOX -> Receipts.
+    mockMoveLog.getOperation.mockResolvedValue(confirmedRecord({ sourcePath: 'Receipts', destPath: 'INBOX' }));
+    mockClient.mailbox = { uidValidity: 2000n };
+    mockClient.fetchOne.mockResolvedValue(envelopeInInbox());
+    mockClient.list.mockResolvedValue([
+      { path: 'INBOX', name: 'INBOX' },
+      { path: 'Receipts', name: 'Receipts' },
+    ]);
+    stubKeepInInbox('accounts@example.com');
+
+    await expect(imap.undoMove('op-1')).rejects.toThrow(/stays in the Inbox/);
+    expect(mockClient.messageMove).not.toHaveBeenCalled();
+  });
+
+  it('allows an undo that puts a keep-in-inbox message back into the Inbox', async () => {
+    const imap = await freshImap();
+    // The original move was INBOX -> Archive, so undoing it returns it to the Inbox.
+    mockMoveLog.getOperation.mockResolvedValue(confirmedRecord());
+    mockClient.mailbox = { uidValidity: 2000n };
+    mockClient.fetchOne.mockResolvedValue(envelopeInInbox());
+    mockClient.messageMove.mockResolvedValue({
+      path: 'INBOX.Archive',
+      destination: 'INBOX',
+      uidValidity: 1000n,
+      uidMap: new Map([[99, 1]]),
+    });
+    const fetchMock = stubKeepInInbox('accounts@example.com');
+
+    await expect(imap.undoMove('op-1')).resolves.toEqual({ newOperationId: 'op-undo' });
+    // Undoing into the Inbox needs no check at all, so Notion is never called.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('allows an undo out of the Inbox for a sender with no rule', async () => {
+    const imap = await freshImap();
+    mockMoveLog.getOperation.mockResolvedValue(confirmedRecord({ sourcePath: 'Receipts', destPath: 'INBOX' }));
+    mockClient.mailbox = { uidValidity: 2000n };
+    mockClient.fetchOne.mockResolvedValue(envelopeInInbox());
+    mockClient.list.mockResolvedValue([
+      { path: 'INBOX', name: 'INBOX' },
+      { path: 'Receipts', name: 'Receipts' },
+    ]);
+    mockClient.messageMove.mockResolvedValue({
+      path: 'INBOX',
+      destination: 'Receipts',
+      uidValidity: 3000n,
+      uidMap: new Map([[99, 5]]),
+    });
+    stubKeepInInbox('somebody-else@example.org');
+
+    await expect(imap.undoMove('op-1')).resolves.toEqual({ newOperationId: 'op-undo' });
+    expect(mockClient.messageMove).toHaveBeenCalledWith('99', 'Receipts', { uid: true });
   });
 });
 

@@ -25,6 +25,8 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 | `OAUTH_REQUIRED_SCOPE` | Optional. Space-separated scopes a token must carry, e.g. `icloud:read icloud:write`. When unset, any valid token for this audience is accepted. |
 | `OAUTH_JWKS_URI` | Optional. The signing key address is discovered from the issuer automatically, so this is only needed for a provider that publishes no discovery document. |
 | `MCP_AUTH_TOKEN` | Optional fallback shared secret, for scripts and scheduled runs that cannot complete an interactive sign-in. Generate one with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Leave unset to accept OAuth only. |
+| `NOTION_EXCEPTIONS_TOKEN` | Optional. A read-only Notion integration secret, used to read the "Email Sorting Exceptions" database. Leave it unset and the feature is off: `list_exceptions` reports that it is not configured, and no exception is enforced on moves. See [Sorting exceptions](#sorting-exceptions). |
+| `NOTION_EXCEPTIONS_DATA_SOURCE_ID` | Optional. The data source to read those rules from. Defaults to `f2ebf247-9368-498f-86a9-3341260874e1`. |
 | `KV_REST_API_URL` | REST URL for the Upstash Redis database used to track moves for undo. Set automatically, under this name, when you connect the Upstash integration to this project in Vercel's Storage tab. |
 | `KV_REST_API_TOKEN` | REST token for the same Upstash database. Also set automatically by the Vercel integration. |
 
@@ -113,6 +115,7 @@ Both read from a local `.env` file and print what they find. Run them separately
 | `list_messages` | List message headers in a folder (subject, sender, date, unread, UID) |
 | `get_message` | Get full headers and body for one message (HTML converted to plain text) |
 | `mark_message` | Mark a message read/unread |
+| `list_exceptions` | List the operator's standing sorting rules, read from Notion |
 | `move_message` | Move a message to another folder (moves into Trash/Junk are blocked by default, server-enforced); returns an `operation_id` you can pass to `undo_move` |
 | `flag_message` | Flag/unflag a message |
 | `undo_move` | Reverse a previous `move_message` by its `operation_id`, with safety checks |
@@ -144,6 +147,26 @@ Both read from a local `.env` file and print what they find. Run them separately
 `move_message` blocks moves into any folder whose IMAP special-use metadata (or, as a fallback, exact folder name) identifies it as Trash or Junk. This is enforced in the server itself — there is no tool parameter that can override it, and no combination of agent instructions changes it. Moving a message *out of* Trash or Junk (recovery) is always allowed.
 
 To lift the restriction, an operator (not the agent) sets `ALLOW_TRASH_JUNK_MOVES=true` in the deployment's environment variables. Leave it unset for the default, safer behaviour.
+
+## Sorting exceptions
+
+Some senders have a standing rule: this one always stays in the Inbox, that one always goes to Receipts. Those rules live in a Notion database called **Email Sorting Exceptions**, and the server reads them itself rather than relying on an agent to look them up first. A scheduled sorting task therefore needs no Notion connector of its own.
+
+Each row has a `Sender` (an address, a domain like `example.com`, or a display name), an `Action` of either `Keep in Inbox` or `Move to Folder`, a `Destination Folder` used only by the second action, and free-text `Notes` and `Timing` columns for your own reference.
+
+The rules are enforced in the server, on every `move_message` and on any `undo_move` that would take a message back out of the Inbox. A move that contradicts a rule is refused, whatever the agent was asked to do. Rows are cached for five minutes per running instance, so an edit in Notion takes up to five minutes to take effect. If the list cannot be read at all, moves are refused rather than allowed through unchecked.
+
+### Giving the server read-only access
+
+1. In Notion, open **Settings → Connections → Develop or manage integrations**, and create a new internal integration.
+2. Under its capabilities, tick **Read content** and nothing else. It never needs to write.
+3. Copy the integration secret and set it as `NOTION_EXCEPTIONS_TOKEN` in Vercel's Project Settings → Environment Variables.
+4. Open the Email Sorting Exceptions database in Notion, use the **`...`** menu → **Connections**, and add your new integration. Share only this database with it.
+5. In that same Connections list, remove the Claude connector from this database. The server reads the rules now, so Claude no longer needs its own access to them.
+
+If you keep the rules in a different database, put its data source id in `NOTION_EXCEPTIONS_DATA_SOURCE_ID`; otherwise leave it unset.
+
+`Notes` and `Timing` are written by a human, but the server still labels them as untrusted when handing them to an agent, for the same reason it labels message bodies: text that reaches a model as content should never read as an instruction.
 
 ## Recovering from a move
 
