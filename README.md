@@ -28,7 +28,8 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 | `NOTION_EXCEPTIONS_TOKEN` | Optional. A read-only Notion integration secret, used to read the "Email Sorting Exceptions" database. Leave it unset and the feature is off: `list_exceptions` reports that it is not configured, and no exception is enforced on moves. See [Sorting exceptions](#sorting-exceptions). |
 | `NOTION_EXCEPTIONS_DATA_SOURCE_ID` | Optional. The data source to read those rules from. Defaults to `f2ebf247-9368-498f-86a9-3341260874e1`. |
 | `SUPABASE_URL` | The API URL of the Supabase project used to track moves for undo and to remember mail scanning progress. Set automatically, under this name, when you connect the Supabase integration to this project in Vercel's Storage tab. |
-| `SUPABASE_SERVICE_ROLE_KEY` | The service role key for the same Supabase project. Also set automatically by the Vercel integration. It bypasses row level security, so it must stay server-side and must never reach a browser. |
+| `SUPABASE_SECRET_KEY` | The full-access key for the same Supabase project, in the form `sb_secret_...`. Set automatically by the Vercel integration. It bypasses row level security, so it must stay server-side and must never reach a browser. |
+| `SUPABASE_SERVICE_ROLE_KEY` | The older name for the same thing, used by a Supabase project set up by hand rather than through Vercel. Set one key or the other; `SUPABASE_SECRET_KEY` wins if both are present. |
 
 See `.env.example` for local development — copy it to `.env` and fill in real values (never commit `.env`).
 
