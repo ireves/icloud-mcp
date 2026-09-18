@@ -7,15 +7,15 @@ import {
   listReminderLists,
   listReminders,
 } from '../lib/caldav.js';
+import { toErrorResult, toResult } from './result.js';
+import {
+  createdIdOutput,
+  getReminderOutput,
+  listReminderListsOutput,
+  listRemindersOutput,
+  okOutput,
+} from './schemas.js';
 
-function toResult(data: unknown) {
-  return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-}
-
-function toErrorResult(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return { content: [{ type: 'text' as const, text: message }], isError: true };
-}
 
 export function registerReminderTools(server: McpServer): void {
   server.registerTool(
@@ -24,10 +24,11 @@ export function registerReminderTools(server: McpServer): void {
       title: 'List Reminder Lists',
       description: "Lists the account's reminder lists.",
       inputSchema: {},
+      outputSchema: listReminderListsOutput,
     },
     async () => {
       try {
-        return toResult(await listReminderLists());
+        return toResult({ lists: await listReminderLists() });
       } catch (error) {
         return toErrorResult(error);
       }
@@ -43,6 +44,7 @@ export function registerReminderTools(server: McpServer): void {
         list_id: z.string().describe('Reminder list identifier, from list_reminder_lists'),
         include_completed: z.boolean().optional().describe('Include completed reminders, default false'),
       },
+      outputSchema: listRemindersOutput,
     },
     async (args) => {
       try {
@@ -50,7 +52,7 @@ export function registerReminderTools(server: McpServer): void {
           listId: args.list_id,
           includeCompleted: args.include_completed,
         });
-        return toResult(reminders);
+        return toResult({ reminders });
       } catch (error) {
         return toErrorResult(error);
       }
@@ -68,6 +70,7 @@ export function registerReminderTools(server: McpServer): void {
         list_id: z.string().describe('Reminder list identifier'),
         reminder_id: z.string().describe('Reminder identifier, from list_reminders'),
       },
+      outputSchema: getReminderOutput,
     },
     async (args) => {
       try {
@@ -89,6 +92,7 @@ export function registerReminderTools(server: McpServer): void {
         due_date: z.string().optional().describe('ISO 8601 due date with an explicit "Z" or timezone offset'),
         notes: z.string().optional().describe('Reminder notes'),
       },
+      outputSchema: createdIdOutput,
     },
     async (args) => {
       try {
@@ -115,6 +119,7 @@ export function registerReminderTools(server: McpServer): void {
         reminder_id: z.string().describe('Reminder identifier, from list_reminders'),
         completed: z.boolean().describe('true = mark completed, false = reopen'),
       },
+      outputSchema: okOutput,
     },
     async (args) => {
       try {

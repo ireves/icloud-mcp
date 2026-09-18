@@ -230,6 +230,14 @@ What it carries over, and why each matters:
 
 Once a move and an undo work against Supabase, remove the Upstash integration from the project.
 
+## Tool results
+
+Every tool declares an output schema, so results go out as structured data as well as the JSON text that carries the same value. A client that understands structured results gets typed fields; one that does not still reads the text.
+
+The server checks each successful result against its tool's schema before sending it, so a result that no longer matches fails here rather than reaching a client in an unexpected shape. Errors and refusals are exempt and still come back as plain text.
+
+A structured result has to be an object, so the tools that used to return a bare list now name it: `list_folders` returns `{ "folders": [...] }`, `list_calendars` returns `{ "calendars": [...] }`, `list_events` returns `{ "events": [...] }`, `list_reminder_lists` returns `{ "lists": [...] }`, and `list_reminders` returns `{ "reminders": [...] }`. Every other tool's shape is unchanged.
+
 ## Recovering from a move
 
 Every `move_message` call is durably logged in Supabase for 7 days, independently of the mail server itself. `undo_move` reverses a logged move, but only after re-verifying that the message is still where it was left: it checks the destination folder's UIDVALIDITY hasn't changed and that the message's identity (Message-ID, date, and subject) still matches what was originally moved, before moving anything back. The same Trash/Junk destination policy applies to undo as to the original move.

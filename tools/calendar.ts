@@ -1,15 +1,15 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createEvent, getEvent, listCalendars, listEvents, updateEvent } from '../lib/caldav.js';
+import { toErrorResult, toResult } from './result.js';
+import {
+  createdIdOutput,
+  getEventOutput,
+  listCalendarsOutput,
+  listEventsOutput,
+  okOutput,
+} from './schemas.js';
 
-function toResult(data: unknown) {
-  return { content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }] };
-}
-
-function toErrorResult(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
-  return { content: [{ type: 'text' as const, text: message }], isError: true };
-}
 
 export function registerCalendarTools(server: McpServer): void {
   server.registerTool(
@@ -18,10 +18,11 @@ export function registerCalendarTools(server: McpServer): void {
       title: 'List Calendars',
       description: "Lists the account's event calendars (name, identifier, colour if available).",
       inputSchema: {},
+      outputSchema: listCalendarsOutput,
     },
     async () => {
       try {
-        return toResult(await listCalendars());
+        return toResult({ calendars: await listCalendars() });
       } catch (error) {
         return toErrorResult(error);
       }
@@ -39,6 +40,7 @@ export function registerCalendarTools(server: McpServer): void {
         start_date: z.string().describe('ISO 8601 start of the date range, with an explicit "Z" or timezone offset'),
         end_date: z.string().describe('ISO 8601 end of the date range, with an explicit "Z" or timezone offset'),
       },
+      outputSchema: listEventsOutput,
     },
     async (args) => {
       try {
@@ -47,7 +49,7 @@ export function registerCalendarTools(server: McpServer): void {
           startDate: args.start_date,
           endDate: args.end_date,
         });
-        return toResult(events);
+        return toResult({ events });
       } catch (error) {
         return toErrorResult(error);
       }
@@ -65,6 +67,7 @@ export function registerCalendarTools(server: McpServer): void {
         calendar_id: z.string().describe('Calendar identifier'),
         event_id: z.string().describe('Event identifier, from list_events'),
       },
+      outputSchema: getEventOutput,
     },
     async (args) => {
       try {
@@ -89,6 +92,7 @@ export function registerCalendarTools(server: McpServer): void {
         location: z.string().optional().describe('Event location'),
         notes: z.string().optional().describe('Event notes/description'),
       },
+      outputSchema: createdIdOutput,
     },
     async (args) => {
       try {
@@ -122,6 +126,7 @@ export function registerCalendarTools(server: McpServer): void {
         location: z.string().optional().describe('New location'),
         notes: z.string().optional().describe('New notes/description'),
       },
+      outputSchema: okOutput,
     },
     async (args) => {
       try {
