@@ -9,6 +9,8 @@ export function createMockRedisClient() {
     zadd: vi.fn(),
     zrange: vi.fn(),
     zrem: vi.fn(),
+    sadd: vi.fn(),
+    smembers: vi.fn(),
   };
 }
 

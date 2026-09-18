@@ -15,7 +15,14 @@ import {
   type MoveIdentity,
   type MoveOperationRecord,
 } from './moveLog.js';
-import { advanceLastSeenUid, getLastSeenUid, getPendingFlaggedUids, setPendingFlaggedUids } from './scanProgress.js';
+import {
+  advanceLastSeenUid,
+  getLastSeenUid,
+  getMaxListedUid,
+  getPendingFlaggedUids,
+  recordMaxListedUid,
+  setPendingFlaggedUids,
+} from './scanProgress.js';
 import { stripInvisible, tagUntrustedInline, wrapUntrusted } from './untrusted.js';
 import { getExceptions, isExceptionsConfigured, matchException, type SortingException } from './exceptions.js';
 
@@ -336,6 +343,15 @@ function toSummary(message: { uid: number; envelope?: FetchedEnvelope; flags?: S
   };
 }
 
+/**
+ * Remembers the highest UID handed out for a folder, so mark_scanned can later
+ * check that a caller is only marking what it was actually shown.
+ */
+async function recordListed(folder: string, results: MessageSummary[]): Promise<void> {
+  if (results.length === 0) return;
+  await recordMaxListedUid(folder, Math.max(...results.map((message) => message.uid)));
+}
+
 export async function listFolders(): Promise<MailboxInfo[]> {
   const client = getClient();
   await client.connect();
@@ -408,6 +424,7 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
           results.push(toSummary(message));
         }
         results.sort((a, b) => a.uid - b.uid);
+        await recordListed(params.folder, results);
         const nextCursor = hasMore ? results[results.length - 1]?.uid : undefined;
         return { messages: results, nextCursor };
       }
@@ -424,6 +441,7 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
         results.push(toSummary(message));
       }
       results.sort((a, b) => b.uid - a.uid);
+      await recordListed(params.folder, results);
       const nextCursor = hasMore ? results[results.length - 1]?.uid : undefined;
       return { messages: results, nextCursor };
     } finally {
@@ -757,11 +775,57 @@ export interface MarkScannedParams {
 }
 
 /**
+ * Asks the mail server how far the folder's UIDs currently go. UIDNEXT is the
+ * UID the next arriving message will get, so the highest one that can exist
+ * today is one below it.
+ */
+async function currentHighestPossibleUid(folder: string): Promise<number | null> {
+  const client = getClient();
+  await client.connect();
+  try {
+    const lock = await client.getMailboxLock(folder);
+    try {
+      if (client.mailbox === false || client.mailbox.uidNext === undefined) return null;
+      const uidNext = Number(client.mailbox.uidNext);
+      return Number.isFinite(uidNext) ? uidNext - 1 : null;
+    } finally {
+      lock.release();
+    }
+  } finally {
+    await client.logout();
+  }
+}
+
+/**
  * Advances the folder's high-water mark so a future `since_last_run` call
  * won't re-return messages up to and including throughUid. Never moves the
  * mark backwards, so calling this with a stale uid is a no-op.
+ *
+ * The mark is only moved to a UID this server has actually handed out. A
+ * caller that asks for an enormous number would otherwise make every message
+ * in the folder count as processed without any of it being read, and the next
+ * scan would quietly skip the lot.
  */
 export async function markScanned(params: MarkScannedParams): Promise<{ lastSeenUid: number }> {
+  const maxListed = await getMaxListedUid(params.folder);
+  if (maxListed === null || params.throughUid > maxListed) {
+    throw new Error(
+      `mark_scanned refused: through_uid ${params.throughUid} is higher than any UID this server has returned ` +
+        `from list_messages for "${params.folder}" in the last 24 hours (${maxListed ?? 'none'}). ` +
+        'Only mark what you have been shown.',
+    );
+  }
+
+  // A second line of defence, in case the recorded value is ever wrong: the
+  // mark can never go past what the mail server says exists.
+  const highestPossible = await currentHighestPossibleUid(params.folder);
+  if (highestPossible !== null && params.throughUid > highestPossible) {
+    throw new Error(
+      `mark_scanned refused: through_uid ${params.throughUid} is higher than the highest UID that exists in ` +
+        `"${params.folder}" (${highestPossible}). Only mark what you have been shown.`,
+    );
+  }
+
   await advanceLastSeenUid(params.folder, params.throughUid);
   const lastSeenUid = await getLastSeenUid(params.folder);
   return { lastSeenUid: lastSeenUid ?? params.throughUid };

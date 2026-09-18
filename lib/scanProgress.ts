@@ -2,6 +2,11 @@ import { getRedis } from './moveLog.js';
 
 const PROGRESS_KEY_PREFIX = 'mail:scan-progress:';
 const PENDING_FLAGGED_KEY_PREFIX = 'mail:pending-flagged:';
+const MAX_LISTED_KEY_PREFIX = 'mail:max-listed-uid:';
+
+// Long enough to cover a scan that is interrupted and resumed later the same
+// day, short enough that a stale mark does not licence a huge jump weeks on.
+const MAX_LISTED_TTL_SECONDS = 24 * 60 * 60;
 
 function progressKey(folder: string): string {
   return `${PROGRESS_KEY_PREFIX}${folder}`;
@@ -9,6 +14,39 @@ function progressKey(folder: string): string {
 
 function pendingFlaggedKey(folder: string): string {
   return `${PENDING_FLAGGED_KEY_PREFIX}${folder}`;
+}
+
+function maxListedKey(folder: string): string {
+  return `${MAX_LISTED_KEY_PREFIX}${folder}`;
+}
+
+/**
+ * The highest UID this server has actually returned from list_messages for a
+ * folder in the last 24 hours, or null if it has returned none. This is what
+ * mark_scanned is checked against: the mark can only be moved to somewhere the
+ * caller has been shown.
+ */
+export async function getMaxListedUid(folder: string): Promise<number | null> {
+  const redis = getRedis();
+  const value = await redis.get(maxListedKey(folder));
+  if (value === null || value === undefined) return null;
+  const uid = Number(value);
+  return Number.isFinite(uid) ? uid : null;
+}
+
+/** Records a newly-listed high-water mark, never moving it backwards. */
+export async function recordMaxListedUid(folder: string, uid: number): Promise<void> {
+  if (!Number.isFinite(uid)) return;
+  const redis = getRedis();
+  const key = maxListedKey(folder);
+  const current = await getMaxListedUid(folder);
+  if (current === null || uid > current) {
+    await redis.set(key, uid, { ex: MAX_LISTED_TTL_SECONDS });
+    return;
+  }
+  // Same or lower, but the folder is still being listed, so keep the record
+  // alive rather than letting it lapse mid-scan.
+  await redis.expire(key, MAX_LISTED_TTL_SECONDS);
 }
 
 /** Highest UID ever confirmed processed in this folder, across all past runs. */

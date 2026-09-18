@@ -130,7 +130,8 @@ export function registerMailTools(server: McpServer): void {
       title: 'Mark Mail Scanned',
       description:
         'Records that messages up through this UID have been processed in a folder, so future list_messages calls with since_last_run skip them. ' +
-        'Only moves the mark forward — call it with the highest UID actually handled, only after handling succeeded.',
+        'Only moves the mark forward — call it with the highest UID actually handled, only after handling succeeded. ' +
+        'The server only accepts a UID it has itself returned from list_messages for this folder in the last 24 hours; anything higher is refused.',
       inputSchema: {
         folder: z.string().describe('Folder path, e.g. "INBOX"'),
         through_uid: z.number().int().positive().describe('Highest UID that has been successfully processed'),

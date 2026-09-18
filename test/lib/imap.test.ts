@@ -7,7 +7,23 @@ const mockClient = vi.hoisted(() => ({
   getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
   messageMove: vi.fn(),
   fetchOne: vi.fn(),
-  mailbox: { uidValidity: 1000n } as { uidValidity: bigint } | false,
+  search: vi.fn(),
+  fetch: vi.fn(),
+  mailbox: { uidValidity: 1000n } as { uidValidity: bigint; uidNext?: number } | false,
+}));
+
+// scanProgress reaches Redis through moveLog.getRedis, so the mock stands in
+// for the database while the real scan-progress logic runs against it.
+const mockRedis = vi.hoisted(() => ({
+  set: vi.fn(),
+  get: vi.fn(),
+  del: vi.fn(),
+  expire: vi.fn(),
+  zadd: vi.fn(),
+  zrange: vi.fn(),
+  zrem: vi.fn(),
+  sadd: vi.fn(),
+  smembers: vi.fn(),
 }));
 
 const mockMoveLog = vi.hoisted(() => ({
@@ -15,6 +31,7 @@ const mockMoveLog = vi.hoisted(() => ({
   markConfirmed: vi.fn(),
   markFailed: vi.fn(),
   markUncertain: vi.fn(),
+  getRedis: vi.fn(),
 }));
 
 vi.mock('imapflow', () => ({
@@ -35,7 +52,12 @@ async function freshImap() {
   for (const fn of Object.values(mockMoveLog)) {
     (fn as ReturnType<typeof vi.fn>).mockReset();
   }
+  for (const fn of Object.values(mockRedis)) {
+    (fn as ReturnType<typeof vi.fn>).mockReset();
+  }
   mockMoveLog.createPendingOperation.mockResolvedValue('op-1');
+  mockMoveLog.getRedis.mockReturnValue(mockRedis);
+  mockRedis.get.mockResolvedValue(null);
   mockClient.getMailboxLock.mockImplementation(async () => ({ release: vi.fn() }));
   mockClient.mailbox = { uidValidity: 1000n };
   mockClient.fetchOne.mockResolvedValue({
@@ -363,5 +385,106 @@ describe('getMessage — choosing between the text and HTML parts', () => {
     const { body } = await imap.getMessage({ folder: 'INBOX', uid: 7 });
 
     expect(body).toContain('The whole message.');
+  });
+});
+
+describe('mark_scanned — only marks what has been listed', () => {
+  const MAX_LISTED_KEY = 'mail:max-listed-uid:INBOX';
+  const PROGRESS_KEY = 'mail:scan-progress:INBOX';
+
+  /** Stands in for Redis: what list_messages recorded, and the current mark. */
+  function redisHolding(values: Record<string, number | null>) {
+    const store = new Map<string, number | null>(Object.entries(values));
+    mockRedis.get.mockImplementation(async (key: string) => store.get(key) ?? null);
+    mockRedis.set.mockImplementation(async (key: string, value: number) => {
+      store.set(key, value);
+      return 'OK';
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('records the highest UID it returned from list_messages', async () => {
+    const imap = await freshImap();
+    mockClient.search.mockResolvedValue([10, 11, 12]);
+    mockClient.fetch.mockImplementation(async function* () {
+      yield { uid: 10, envelope: { subject: 'a' }, flags: new Set<string>() };
+      yield { uid: 12, envelope: { subject: 'b' }, flags: new Set<string>() };
+      yield { uid: 11, envelope: { subject: 'c' }, flags: new Set<string>() };
+    });
+
+    await imap.listMessages({ folder: 'INBOX' });
+
+    expect(mockRedis.set).toHaveBeenCalledWith(MAX_LISTED_KEY, 12, { ex: 24 * 60 * 60 });
+  });
+
+  it('records nothing when a folder returns no messages', async () => {
+    const imap = await freshImap();
+    mockClient.search.mockResolvedValue([]);
+
+    await imap.listMessages({ folder: 'INBOX' });
+
+    expect(mockRedis.set).not.toHaveBeenCalled();
+  });
+
+  it('accepts a UID that was listed', async () => {
+    const imap = await freshImap();
+    redisHolding({ [MAX_LISTED_KEY]: 120, [PROGRESS_KEY]: 100 });
+    mockClient.mailbox = { uidValidity: 1000n, uidNext: 200 };
+
+    const result = await imap.markScanned({ folder: 'INBOX', throughUid: 120 });
+
+    expect(mockRedis.set).toHaveBeenCalledWith(PROGRESS_KEY, 120);
+    expect(result.lastSeenUid).toBe(120);
+  });
+
+  it('refuses a UID higher than anything it has listed', async () => {
+    const imap = await freshImap();
+    redisHolding({ [MAX_LISTED_KEY]: 120 });
+
+    await expect(imap.markScanned({ folder: 'INBOX', throughUid: 999999 })).rejects.toThrow(
+      /mark_scanned refused: through_uid 999999 is higher than any UID this server has returned/,
+    );
+    expect(mockRedis.set).not.toHaveBeenCalled();
+  });
+
+  it('names the folder and the highest UID it did list', async () => {
+    const imap = await freshImap();
+    redisHolding({ [MAX_LISTED_KEY]: 120 });
+
+    await expect(imap.markScanned({ folder: 'INBOX', throughUid: 121 })).rejects.toThrow(
+      /for "INBOX" in the last 24 hours \(120\)/,
+    );
+  });
+
+  it('refuses once the recorded value has expired, even for a UID listed yesterday', async () => {
+    const imap = await freshImap();
+    redisHolding({ [PROGRESS_KEY]: 100 }); // the 24-hour record is gone
+
+    await expect(imap.markScanned({ folder: 'INBOX', throughUid: 110 })).rejects.toThrow(/\(none\)/);
+    expect(mockRedis.set).not.toHaveBeenCalled();
+  });
+
+  it('refuses a UID beyond what exists in the folder, even if the record allows it', async () => {
+    const imap = await freshImap();
+    redisHolding({ [MAX_LISTED_KEY]: 5000 }); // a wrong or tampered-with record
+    mockClient.mailbox = { uidValidity: 1000n, uidNext: 201 };
+
+    await expect(imap.markScanned({ folder: 'INBOX', throughUid: 5000 })).rejects.toThrow(
+      /higher than the highest UID that exists in "INBOX" \(200\)/,
+    );
+    expect(mockRedis.set).not.toHaveBeenCalled();
+  });
+
+  it('accepts the highest UID that does exist', async () => {
+    const imap = await freshImap();
+    redisHolding({ [MAX_LISTED_KEY]: 200, [PROGRESS_KEY]: 100 });
+    mockClient.mailbox = { uidValidity: 1000n, uidNext: 201 };
+
+    await expect(imap.markScanned({ folder: 'INBOX', throughUid: 200 })).resolves.toMatchObject({
+      lastSeenUid: 200,
+    });
   });
 });

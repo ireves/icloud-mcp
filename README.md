@@ -113,6 +113,8 @@ Both read from a local `.env` file and print what they find. Run them separately
 |---|---|
 | `list_folders` | List all mail folders |
 | `list_messages` | List message headers in a folder (subject, sender, date, unread, UID) |
+| `mark_scanned` | Record how far a folder has been processed; only accepts a UID the server has listed |
+| `reconcile_flagged` | Return messages unflagged since the previous call, so they get sorted |
 | `get_message` | Get full headers and body for one message (HTML converted to plain text, hidden text removed, body marked untrusted) |
 | `mark_message` | Mark a message read/unread |
 | `list_exceptions` | List the operator's standing sorting rules, read from Notion |
@@ -175,6 +177,12 @@ The rules are enforced in the server, on every `move_message` and on any `undo_m
 If you keep the rules in a different database, put its data source id in `NOTION_EXCEPTIONS_DATA_SOURCE_ID`; otherwise leave it unset.
 
 `Notes` and `Timing` are written by a human, but the server still labels them as untrusted when handing them to an agent, for the same reason it labels message bodies: text that reaches a model as content should never read as an instruction.
+
+## The scan marker
+
+`list_messages` with `since_last_run` skips everything past the folder's mark, and `mark_scanned` moves that mark forward. A mark set too far ahead is a quiet way to make mail disappear: the messages stay where they are, but no future scan ever looks at them again.
+
+So the server only accepts a UID it has itself returned from `list_messages` for that folder in the last 24 hours. Anything higher is refused, naming the highest it did return. A second check refuses a UID beyond what exists in the folder at all, in case the recorded value is ever wrong.
 
 ## Hidden text in messages
 
