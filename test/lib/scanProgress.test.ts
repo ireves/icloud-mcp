@@ -125,7 +125,7 @@ describe('scan progress mark', () => {
 
     await scanProgress.advanceLastSeenUid('INBOX', 120);
 
-    expect(upsertValues(PROGRESS)).toEqual({ folder: 'INBOX', last_seen_uid: 120 });
+    expect(upsertValues(PROGRESS)).toEqual({ folder: 'INBOX', last_seen_uid: 120, uid_validity: null });
   });
 
   it('sets the first mark for a folder that has none', async () => {
@@ -134,7 +134,7 @@ describe('scan progress mark', () => {
 
     await scanProgress.advanceLastSeenUid('INBOX', 42);
 
-    expect(upsertValues(PROGRESS)).toEqual({ folder: 'INBOX', last_seen_uid: 42 });
+    expect(upsertValues(PROGRESS)).toEqual({ folder: 'INBOX', last_seen_uid: 42, uid_validity: null });
   });
 
   it('never moves the mark backwards', async () => {
@@ -197,5 +197,86 @@ describe('database errors', () => {
     await expect(scanProgress.getLastSeenUid('INBOX')).rejects.toThrow(
       /Reading the scan progress mark failed: permission denied/,
     );
+  });
+});
+
+describe('folder renumbering (UIDVALIDITY)', () => {
+  it('ignores a scan mark left over from an older numbering', async () => {
+    const scanProgress = await freshScanProgress();
+    client.queueData(PROGRESS, 'select', { last_seen_uid: 33536, uid_validity: '1000' });
+
+    expect(await scanProgress.getLastSeenUid('INBOX', '2000')).toBeNull();
+  });
+
+  it('accepts a scan mark from the numbering in force', async () => {
+    const scanProgress = await freshScanProgress();
+    client.queueData(PROGRESS, 'select', { last_seen_uid: 33536, uid_validity: '1000' });
+
+    expect(await scanProgress.getLastSeenUid('INBOX', '1000')).toBe(33536);
+  });
+
+  it('trusts a mark stored before the numbering was tracked', async () => {
+    const scanProgress = await freshScanProgress();
+    client.queueData(PROGRESS, 'select', { last_seen_uid: 33536, uid_validity: null });
+
+    expect(await scanProgress.getLastSeenUid('INBOX', '1000')).toBe(33536);
+  });
+
+  it('trusts a stored mark when the current numbering could not be read', async () => {
+    const scanProgress = await freshScanProgress();
+    client.queueData(PROGRESS, 'select', { last_seen_uid: 33536, uid_validity: '1000' });
+
+    expect(await scanProgress.getLastSeenUid('INBOX', null)).toBe(33536);
+  });
+
+  it('replaces a renumbered mark even with a lower UID', async () => {
+    const scanProgress = await freshScanProgress();
+    // The stored mark belongs to the old numbering, so it reads as absent and
+    // the never-backwards rule has nothing to hold the new value against.
+    client.queueData(PROGRESS, 'select', { last_seen_uid: 33536, uid_validity: '1000' });
+
+    await scanProgress.advanceLastSeenUid('INBOX', 7, '2000');
+
+    expect(upsertValues(PROGRESS)).toEqual({
+      folder: 'INBOX',
+      last_seen_uid: 7,
+      uid_validity: '2000',
+    });
+  });
+
+  it('still refuses to move a mark backwards within one numbering', async () => {
+    const scanProgress = await freshScanProgress();
+    client.queueData(PROGRESS, 'select', { last_seen_uid: 33536, uid_validity: '1000' });
+
+    await scanProgress.advanceLastSeenUid('INBOX', 7, '1000');
+
+    expect(client.callsFor(PROGRESS, 'upsert')).toHaveLength(0);
+  });
+
+  it('records the numbering alongside a new mark', async () => {
+    const scanProgress = await freshScanProgress();
+    client.queueData(PROGRESS, 'select', null);
+
+    await scanProgress.advanceLastSeenUid('INBOX', 42, '1000');
+
+    expect(upsertValues(PROGRESS).uid_validity).toBe('1000');
+  });
+
+  it('ignores a listed-UID record from an older numbering', async () => {
+    const scanProgress = await freshScanProgress();
+    client.queueData(MAX_LISTED, 'select', { uid: 33605, uid_validity: '1000' });
+
+    expect(await scanProgress.getMaxListedUid('INBOX', '2000')).toBeNull();
+  });
+
+  it('replaces a renumbered listed-UID record rather than keeping the higher value', async () => {
+    const scanProgress = await freshScanProgress();
+    client.queueData(MAX_LISTED, 'select', { uid: 33605, uid_validity: '1000' });
+
+    await scanProgress.recordMaxListedUid('INBOX', 12, '2000');
+
+    const values = upsertValues(MAX_LISTED);
+    expect(values.uid).toBe(12);
+    expect(values.uid_validity).toBe('2000');
   });
 });

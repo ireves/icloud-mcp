@@ -22,6 +22,7 @@ import {
   getPendingFlaggedUids,
   recordMaxListedUid,
   setPendingFlaggedUids,
+  type UidValidity,
 } from './scanProgress.js';
 import { stripInvisible, tagUntrustedInline, wrapUntrusted } from './untrusted.js';
 import { getExceptions, isExceptionsConfigured, matchException, type SortingException } from './exceptions.js';
@@ -371,9 +372,22 @@ function toSummary(message: { uid: number; envelope?: FetchedEnvelope; flags?: S
  * Remembers the highest UID handed out for a folder, so mark_scanned can later
  * check that a caller is only marking what it was actually shown.
  */
-async function recordListed(folder: string, results: MessageSummary[]): Promise<void> {
+async function recordListed(
+  folder: string,
+  results: MessageSummary[],
+  uidValidity: UidValidity,
+): Promise<void> {
   if (results.length === 0) return;
-  await recordMaxListedUid(folder, Math.max(...results.map((message) => message.uid)));
+  await recordMaxListedUid(folder, Math.max(...results.map((message) => message.uid)), uidValidity);
+}
+
+/**
+ * The open folder's UIDVALIDITY as a string, or null if the server did not
+ * report one. Stored alongside every UID so a mark from an older numbering is
+ * recognised rather than trusted.
+ */
+function openUidValidity(client: ImapFlow): UidValidity {
+  return client.mailbox !== false ? client.mailbox.uidValidity.toString() : null;
 }
 
 export async function listFolders(): Promise<MailboxInfo[]> {
@@ -414,9 +428,10 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
   try {
     const lock = await client.getMailboxLock(params.folder);
     try {
+      const uidValidity = openUidValidity(client);
       let afterUid = params.afterUid;
       if (params.sinceLastRun) {
-        const lastSeen = await getLastSeenUid(params.folder);
+        const lastSeen = await getLastSeenUid(params.folder, uidValidity);
         if (lastSeen !== null) afterUid = afterUid !== undefined ? Math.max(afterUid, lastSeen) : lastSeen;
       }
 
@@ -448,7 +463,7 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
           results.push(toSummary(message));
         }
         results.sort((a, b) => a.uid - b.uid);
-        await recordListed(params.folder, results);
+        await recordListed(params.folder, results, uidValidity);
         const nextCursor = hasMore ? results[results.length - 1]?.uid : undefined;
         return { messages: results, nextCursor };
       }
@@ -465,7 +480,7 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
         results.push(toSummary(message));
       }
       results.sort((a, b) => b.uid - a.uid);
-      await recordListed(params.folder, results);
+      await recordListed(params.folder, results, uidValidity);
       const nextCursor = hasMore ? results[results.length - 1]?.uid : undefined;
       return { messages: results, nextCursor };
     } finally {
@@ -803,15 +818,23 @@ export interface MarkScannedParams {
  * UID the next arriving message will get, so the highest one that can exist
  * today is one below it.
  */
-async function currentHighestPossibleUid(folder: string): Promise<number | null> {
+async function currentFolderState(
+  folder: string,
+): Promise<{ highestPossibleUid: number | null; uidValidity: UidValidity }> {
   const client = getClient();
   await client.connect();
   try {
     const lock = await client.getMailboxLock(folder);
     try {
-      if (client.mailbox === false || client.mailbox.uidNext === undefined) return null;
+      const uidValidity = openUidValidity(client);
+      if (client.mailbox === false || client.mailbox.uidNext === undefined) {
+        return { highestPossibleUid: null, uidValidity };
+      }
       const uidNext = Number(client.mailbox.uidNext);
-      return Number.isFinite(uidNext) ? uidNext - 1 : null;
+      return {
+        highestPossibleUid: Number.isFinite(uidNext) ? uidNext - 1 : null,
+        uidValidity,
+      };
     } finally {
       lock.release();
     }
@@ -831,7 +854,12 @@ async function currentHighestPossibleUid(folder: string): Promise<number | null>
  * scan would quietly skip the lot.
  */
 export async function markScanned(params: MarkScannedParams): Promise<{ lastSeenUid: number }> {
-  const maxListed = await getMaxListedUid(params.folder);
+  // The folder is asked about first so that every stored value below is read
+  // against the numbering in force right now. A record from an older
+  // numbering then reads as absent rather than being trusted.
+  const { highestPossibleUid, uidValidity } = await currentFolderState(params.folder);
+
+  const maxListed = await getMaxListedUid(params.folder, uidValidity);
   if (maxListed === null || params.throughUid > maxListed) {
     throw new Error(
       `mark_scanned refused: through_uid ${params.throughUid} is higher than any UID this server has returned ` +
@@ -842,16 +870,15 @@ export async function markScanned(params: MarkScannedParams): Promise<{ lastSeen
 
   // A second line of defence, in case the recorded value is ever wrong: the
   // mark can never go past what the mail server says exists.
-  const highestPossible = await currentHighestPossibleUid(params.folder);
-  if (highestPossible !== null && params.throughUid > highestPossible) {
+  if (highestPossibleUid !== null && params.throughUid > highestPossibleUid) {
     throw new Error(
       `mark_scanned refused: through_uid ${params.throughUid} is higher than the highest UID that exists in ` +
-        `"${params.folder}" (${highestPossible}). Only mark what you have been shown.`,
+        `"${params.folder}" (${highestPossibleUid}). Only mark what you have been shown.`,
     );
   }
 
-  await advanceLastSeenUid(params.folder, params.throughUid);
-  const lastSeenUid = await getLastSeenUid(params.folder);
+  await advanceLastSeenUid(params.folder, params.throughUid, uidValidity);
+  const lastSeenUid = await getLastSeenUid(params.folder, uidValidity);
   return { lastSeenUid: lastSeenUid ?? params.throughUid };
 }
 

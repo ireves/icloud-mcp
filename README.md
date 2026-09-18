@@ -203,6 +203,14 @@ The style rules match a whole value rather than the start of one, so small print
 
 Where a message has both a plain-text and an HTML part, the plain-text part is used as before, unless it is very short next to a much longer HTML part. A one-line text part beside a full HTML message is usually a stub, and occasionally a decoy, so the HTML conversion is used instead.
 
+## When a folder is renumbered
+
+Mail servers number the messages in a folder, and those numbers are what this server stores to remember how far a folder has been sorted. The numbers only mean anything within one UIDVALIDITY, a value the server reports per folder and changes if it ever resets that folder's numbering, usually after the folder is recreated or restored.
+
+Each stored mark records the UIDVALIDITY it belongs to. When a folder's numbering has changed, a mark from the old numbering reads as absent, so `since_last_run` starts from the beginning of the folder rather than skipping to a number that no longer refers to anything. The replacement mark is written under the new numbering even if it is lower than the old one.
+
+A mark stored with no UIDVALIDITY is one written before this was recorded; it cannot be checked after the fact, so it is used as-is. The limits in `mark_scanned` still apply either way.
+
 ## Moving the stored data from Upstash
 
 Earlier versions kept this server's durable state in Upstash Redis. If you are switching an existing deployment to Supabase, copy the data across before you cut over, using the credentials for both:

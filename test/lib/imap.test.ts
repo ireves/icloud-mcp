@@ -457,7 +457,7 @@ describe('mark_scanned — only marks what has been listed', () => {
 
     await imap.listMessages({ folder: 'INBOX' });
 
-    expect(mockScanProgress.recordMaxListedUid).toHaveBeenCalledWith('INBOX', 12);
+    expect(mockScanProgress.recordMaxListedUid).toHaveBeenCalledWith('INBOX', 12, '1000');
   });
 
   it('records nothing when a folder returns no messages', async () => {
@@ -476,7 +476,7 @@ describe('mark_scanned — only marks what has been listed', () => {
 
     const result = await imap.markScanned({ folder: 'INBOX', throughUid: 120 });
 
-    expect(mockScanProgress.advanceLastSeenUid).toHaveBeenCalledWith('INBOX', 120);
+    expect(mockScanProgress.advanceLastSeenUid).toHaveBeenCalledWith('INBOX', 120, '1000');
     expect(result.lastSeenUid).toBe(120);
   });
 
@@ -526,5 +526,75 @@ describe('mark_scanned — only marks what has been listed', () => {
     await expect(imap.markScanned({ folder: 'INBOX', throughUid: 200 })).resolves.toMatchObject({
       lastSeenUid: 200,
     });
+  });
+});
+
+describe('mark_scanned — checks marks against the folder\'s current numbering', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('reads the scan position against the open folder\'s UIDVALIDITY', async () => {
+    const imap = await freshImap();
+    mockScanProgress.getLastSeenUid.mockResolvedValue(100);
+    mockClient.search.mockResolvedValue([]);
+    mockClient.mailbox = { uidValidity: 1000n };
+
+    await imap.listMessages({ folder: 'INBOX', sinceLastRun: true });
+
+    expect(mockScanProgress.getLastSeenUid).toHaveBeenCalledWith('INBOX', '1000');
+  });
+
+  it('records a listed UID against the open folder\'s UIDVALIDITY', async () => {
+    const imap = await freshImap();
+    mockClient.search.mockResolvedValue([10]);
+    mockClient.fetch.mockImplementation(async function* () {
+      yield { uid: 10, envelope: { subject: 'a' }, flags: new Set<string>() };
+    });
+    mockClient.mailbox = { uidValidity: 1000n };
+
+    await imap.listMessages({ folder: 'INBOX' });
+
+    expect(mockScanProgress.recordMaxListedUid).toHaveBeenCalledWith('INBOX', 10, '1000');
+  });
+
+  it('starts from the beginning when the folder has been renumbered', async () => {
+    const imap = await freshImap();
+    // A mark from an older numbering reads as absent, so no afterUid narrows
+    // the scan and every message comes back.
+    mockScanProgress.getLastSeenUid.mockResolvedValue(null);
+    mockClient.search.mockResolvedValue([1, 2]);
+    mockClient.fetch.mockImplementation(async function* () {
+      yield { uid: 1, envelope: { subject: 'a' }, flags: new Set<string>() };
+      yield { uid: 2, envelope: { subject: 'b' }, flags: new Set<string>() };
+    });
+
+    const { messages } = await imap.listMessages({ folder: 'INBOX', sinceLastRun: true });
+
+    expect(messages.map((m) => m.uid)).toEqual([2, 1]);
+  });
+
+  it('passes the folder\'s UIDVALIDITY to every stored read and write', async () => {
+    const imap = await freshImap();
+    mockScanProgress.getMaxListedUid.mockResolvedValue(120);
+    mockScanProgress.getLastSeenUid.mockResolvedValue(120);
+    mockClient.mailbox = { uidValidity: 2000n, uidNext: 200 };
+
+    await imap.markScanned({ folder: 'INBOX', throughUid: 120 });
+
+    expect(mockScanProgress.getMaxListedUid).toHaveBeenCalledWith('INBOX', '2000');
+    expect(mockScanProgress.advanceLastSeenUid).toHaveBeenCalledWith('INBOX', 120, '2000');
+    expect(mockScanProgress.getLastSeenUid).toHaveBeenCalledWith('INBOX', '2000');
+  });
+
+  it('refuses when the listed record belongs to an older numbering', async () => {
+    const imap = await freshImap();
+    // getMaxListedUid returns null for a renumbered record, which is the same
+    // signal as never having listed the folder at all.
+    mockScanProgress.getMaxListedUid.mockResolvedValue(null);
+    mockClient.mailbox = { uidValidity: 2000n, uidNext: 200 };
+
+    await expect(imap.markScanned({ folder: 'INBOX', throughUid: 120 })).rejects.toThrow(/\(none\)/);
+    expect(mockScanProgress.advanceLastSeenUid).not.toHaveBeenCalled();
   });
 });
