@@ -1,5 +1,7 @@
 # Durable Move Undo (Phase C) Implementation Plan
 
+> **Superseded (September 2026):** this storage now lives in Supabase (Postgres) rather than Upstash Redis. The data model and guarantees are unchanged; see `supabase/migrations/` for the tables and `lib/supabase.ts` for the client. The Redis details below are kept as a record of the original design.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Give `move_message` a durable, undoable operation log backed by Upstash Redis, plus an `undo_move` tool and read-only inspection tools, per Phase C of the second security review.

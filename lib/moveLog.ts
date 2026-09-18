@@ -1,13 +1,5 @@
-import { Redis } from '@upstash/redis';
 import { randomUUID } from 'node:crypto';
-
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} is not set`);
-  }
-  return value;
-}
+import { failQuery, getSupabase, UNIQUE_VIOLATION } from './supabase.js';
 
 export type MoveOperationStatus = 'pending' | 'confirmed' | 'failed' | 'uncertain' | 'undone';
 
@@ -49,66 +41,102 @@ export interface ListOperationsResult {
 }
 
 export const OPERATION_TTL_SECONDS = 7 * 24 * 60 * 60;
+export const UNDO_LOCK_TTL_SECONDS = 30;
 export const DEFAULT_LIST_LIMIT = 20;
 export const MAX_LIST_LIMIT = 100;
 
-const OP_KEY_PREFIX = 'move:op:';
-const INDEX_KEY = 'move:by-time';
-const LOCK_KEY_PREFIX = 'move:lock:';
+export const OPERATIONS_TABLE = 'move_operations';
+export const UNDO_LOCKS_TABLE = 'undo_locks';
 
-let cachedClient: Redis | null = null;
-
-export function getRedis(): Redis {
-  if (cachedClient) return cachedClient;
-  cachedClient = new Redis({
-    // Vercel's Upstash marketplace integration names these KV_REST_API_* —
-    // not UPSTASH_REDIS_REST_* — regardless of the underlying Upstash product.
-    url: requireEnv('KV_REST_API_URL'),
-    token: requireEnv('KV_REST_API_TOKEN'),
-  });
-  return cachedClient;
+/** The stored shape: snake_case columns, timestamps as ISO strings. */
+interface MoveOperationRow {
+  id: string;
+  status: MoveOperationStatus;
+  source_path: string;
+  source_uid: number;
+  source_uid_validity: string;
+  dest_path: string;
+  dest_uid: number | null;
+  dest_uid_validity: string | null;
+  identity: MoveIdentity;
+  created_at: string;
+  confirmed_at: string | null;
+  error: string | null;
+  undo_of: string | null;
+  undone_by: string | null;
 }
 
-function opKey(operationId: string): string {
-  return `${OP_KEY_PREFIX}${operationId}`;
+function toRecord(row: MoveOperationRow): MoveOperationRecord {
+  return {
+    id: row.id,
+    status: row.status,
+    sourcePath: row.source_path,
+    sourceUid: Number(row.source_uid),
+    sourceUidValidity: row.source_uid_validity,
+    destPath: row.dest_path,
+    destUid: row.dest_uid === null ? null : Number(row.dest_uid),
+    destUidValidity: row.dest_uid_validity,
+    identity: row.identity,
+    createdAt: Date.parse(row.created_at),
+    confirmedAt: row.confirmed_at === null ? null : Date.parse(row.confirmed_at),
+    error: row.error,
+    undoOf: row.undo_of,
+    undoneBy: row.undone_by,
+  };
 }
 
-async function writeRecord(record: MoveOperationRecord): Promise<void> {
-  const redis = getRedis();
-  await redis.set(opKey(record.id), JSON.stringify(record));
-  await redis.expire(opKey(record.id), OPERATION_TTL_SECONDS);
+/** Only the columns a patch actually touches, so updates stay narrow. */
+function toRowPatch(patch: Partial<MoveOperationRecord>): Record<string, unknown> {
+  const row: Record<string, unknown> = {};
+  if (patch.status !== undefined) row.status = patch.status;
+  if (patch.destUid !== undefined) row.dest_uid = patch.destUid;
+  if (patch.destUidValidity !== undefined) row.dest_uid_validity = patch.destUidValidity;
+  if (patch.confirmedAt !== undefined) {
+    row.confirmed_at = patch.confirmedAt === null ? null : new Date(patch.confirmedAt).toISOString();
+  }
+  if (patch.error !== undefined) row.error = patch.error;
+  if (patch.undoneBy !== undefined) row.undone_by = patch.undoneBy;
+  return row;
 }
 
 export async function createPendingOperation(params: CreatePendingOperationParams): Promise<string> {
   const id = randomUUID();
-  const createdAt = Date.now();
-  const record: MoveOperationRecord = {
-    id,
-    status: 'pending',
-    sourcePath: params.sourcePath,
-    sourceUid: params.sourceUid,
-    sourceUidValidity: params.sourceUidValidity.toString(),
-    destPath: params.destPath,
-    destUid: null,
-    destUidValidity: null,
-    identity: params.identity,
-    createdAt,
-    confirmedAt: null,
-    error: null,
-    undoOf: params.undoOf ?? null,
-    undoneBy: null,
-  };
-  await writeRecord(record);
-  const redis = getRedis();
-  await redis.zadd(INDEX_KEY, { score: createdAt, member: id });
+  const createdAt = new Date();
+  const { error } = await getSupabase()
+    .from(OPERATIONS_TABLE)
+    .insert({
+      id,
+      status: 'pending',
+      source_path: params.sourcePath,
+      source_uid: params.sourceUid,
+      source_uid_validity: params.sourceUidValidity.toString(),
+      dest_path: params.destPath,
+      dest_uid: null,
+      dest_uid_validity: null,
+      identity: params.identity,
+      created_at: createdAt.toISOString(),
+      confirmed_at: null,
+      error: null,
+      undo_of: params.undoOf ?? null,
+      undone_by: null,
+      expires_at: new Date(createdAt.getTime() + OPERATION_TTL_SECONDS * 1000).toISOString(),
+    });
+  if (error) failQuery('Recording the move operation', error);
   return id;
 }
 
 export async function getOperation(operationId: string): Promise<MoveOperationRecord | null> {
-  const redis = getRedis();
-  const raw = await redis.get(opKey(operationId));
-  if (!raw) return null;
-  return (typeof raw === 'string' ? JSON.parse(raw) : raw) as MoveOperationRecord;
+  const { data, error } = await getSupabase()
+    .from(OPERATIONS_TABLE)
+    .select('*')
+    // Postgres does not expire rows on its own, so retention is enforced on
+    // read as well as by the nightly sweep. An operation past its 7 days
+    // reads as absent either way.
+    .gt('expires_at', new Date().toISOString())
+    .eq('id', operationId)
+    .maybeSingle();
+  if (error) failQuery('Reading the move operation', error);
+  return data ? toRecord(data as MoveOperationRow) : null;
 }
 
 async function updateRecord(operationId: string, patch: Partial<MoveOperationRecord>): Promise<void> {
@@ -116,7 +144,11 @@ async function updateRecord(operationId: string, patch: Partial<MoveOperationRec
   if (!existing) {
     throw new Error(`Move operation ${operationId} not found or has expired.`);
   }
-  await writeRecord({ ...existing, ...patch });
+  const { error } = await getSupabase()
+    .from(OPERATIONS_TABLE)
+    .update(toRowPatch(patch))
+    .eq('id', operationId);
+  if (error) failQuery('Updating the move operation', error);
 }
 
 export async function markConfirmed(
@@ -146,31 +178,47 @@ export async function markUndone(operationId: string, undoneByOperationId: strin
 export async function listOperations(
   params: { limit?: number; cursor?: number } = {},
 ): Promise<ListOperationsResult> {
-  const redis = getRedis();
   const limit = Math.min(params.limit ?? DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT);
   const start = params.cursor ?? 0;
-  // Reverse-chronological: highest score (most recent) first.
-  const ids = (await redis.zrange(INDEX_KEY, start, start + limit - 1, { rev: true })) as string[];
-  const operations: MoveOperationRecord[] = [];
-  for (const id of ids) {
-    const record = await getOperation(id);
-    if (record) {
-      operations.push(record);
-    } else {
-      await redis.zrem(INDEX_KEY, id);
-    }
-  }
-  const nextCursor = ids.length === limit ? start + limit : null;
-  return { operations, nextCursor };
+  const { data, error } = await getSupabase()
+    .from(OPERATIONS_TABLE)
+    .select('*')
+    .gt('expires_at', new Date().toISOString())
+    // Reverse-chronological: most recent first.
+    .order('created_at', { ascending: false })
+    .range(start, start + limit - 1);
+  if (error) failQuery('Listing move operations', error);
+  const rows = (data ?? []) as MoveOperationRow[];
+  const nextCursor = rows.length === limit ? start + limit : null;
+  return { operations: rows.map(toRecord), nextCursor };
 }
 
 export async function acquireUndoLock(operationId: string): Promise<boolean> {
-  const redis = getRedis();
-  const result = await redis.set(`${LOCK_KEY_PREFIX}${operationId}`, '1', { nx: true, ex: 30 });
-  return result === 'OK';
+  const supabase = getSupabase();
+  const now = new Date();
+  // Clear a lock whose holder never released it, then claim the slot. Only the
+  // insert needs to be atomic, and the primary key makes it so: a second
+  // caller arriving while the first still holds the row is rejected outright.
+  const { error: clearError } = await supabase
+    .from(UNDO_LOCKS_TABLE)
+    .delete()
+    .lte('expires_at', now.toISOString())
+    .eq('operation_id', operationId);
+  if (clearError) failQuery('Clearing a stale undo lock', clearError);
+
+  const { error } = await supabase.from(UNDO_LOCKS_TABLE).insert({
+    operation_id: operationId,
+    expires_at: new Date(now.getTime() + UNDO_LOCK_TTL_SECONDS * 1000).toISOString(),
+  });
+  if (!error) return true;
+  if (error.code === UNIQUE_VIOLATION) return false;
+  failQuery('Acquiring the undo lock', error);
 }
 
 export async function releaseUndoLock(operationId: string): Promise<void> {
-  const redis = getRedis();
-  await redis.del(`${LOCK_KEY_PREFIX}${operationId}`);
+  const { error } = await getSupabase()
+    .from(UNDO_LOCKS_TABLE)
+    .delete()
+    .eq('operation_id', operationId);
+  if (error) failQuery('Releasing the undo lock', error);
 }

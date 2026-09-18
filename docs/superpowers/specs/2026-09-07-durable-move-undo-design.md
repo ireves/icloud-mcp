@@ -1,5 +1,7 @@
 # Phase C: Durable Undo for Email Moves — Design
 
+> **Superseded (September 2026):** this storage now lives in Supabase (Postgres) rather than Upstash Redis. The data model and guarantees are unchanged; see `supabase/migrations/` for the tables and `lib/supabase.ts` for the client. The Redis details below are kept as a record of the original design.
+
 ## Context
 
 The second external security review (item 6 of 9) requires reliable, durable undo for `move_message`, backed by storage that survives across serverless invocations (not process memory). This is Phase C of the four-phase response to that review; Phase A (calendar correctness) and Phase B (Trash/Junk destination policy) are complete and merged. Phase D (read-only mode, rate limiting) follows this one.
