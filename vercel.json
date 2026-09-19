@@ -1,13 +1,8 @@
 {
-  "buildCommand": null,
-  "rewrites": [
+  "crons": [
     {
-      "source": "/.well-known/oauth-protected-resource",
-      "destination": "/api/oauth-protected-resource"
-    },
-    {
-      "source": "/.well-known/oauth-protected-resource/:path*",
-      "destination": "/api/oauth-protected-resource"
+      "path": "/api/cron/keepalive",
+      "schedule": "0 6 * * *"
     }
   ]
 }

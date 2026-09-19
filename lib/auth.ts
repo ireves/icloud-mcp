@@ -1,299 +1,401 @@
-import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from 'jose';
+// This deployment's own OAuth 2.1 authorization server.
+//
+// Earlier versions pointed at an outside provider named by OAUTH_ISSUER and
+// only checked the tokens it issued. That indirection is gone: the server now
+// issues its own tokens, so there is no provider dashboard to keep in step with
+// it, no client ID or secret to copy around, and no redirect URL to re-register
+// when a client changes one.
+//
+// Clients identify themselves in one of two ways, both automatic:
+//
+//   - Client ID Metadata Documents, where the client hosts a small JSON file
+//     and the URL of that file is its client ID. This is what the 2026-07-28
+//     MCP revision asks for, and what Claude and ChatGPT prefer.
+//   - Dynamic client registration, kept on as a fallback for older clients.
+//
+// The human half is a passkey. One is registered on first run, guarded by
+// MCP_SETUP_CODE, and after that the code is inert because registration closes
+// as soon as a passkey exists.
 
-/**
- * Access control for the public MCP endpoint.
- *
- * One route is accepted: an OAuth 2.1 access token issued by the
- * authorization server named in OAUTH_ISSUER. The server acts as a resource
- * server per the MCP authorization spec, validating the token's signature,
- * issuer, audience and scope on every request.
- *
- * There is deliberately no shared-secret alternative. One long-lived string
- * that unlocks every tool is exactly what an attacker who reads it once needs,
- * and it cannot be scoped, attributed to a person, or expired. A caller that
- * cannot complete an interactive sign-in should use a token issued to it by
- * the authorization server instead.
- */
+import { betterAuth } from 'better-auth';
+import { jwt } from 'better-auth/plugins';
+import { mcp } from '@better-auth/mcp';
+import { cimd } from '@better-auth/cimd';
+import { fetchClientMetadataResource } from '@better-auth/cimd/node';
+import { passkey } from '@better-auth/passkey';
+import { Pool } from 'pg';
+import { timingSafeEqual } from 'node:crypto';
 
-export type AuthFailureReason = 'missing_token' | 'invalid_token' | 'insufficient_scope';
-
-export interface AuthSuccess {
-  ok: true;
-  /** How the caller proved itself, for logging and for tests. */
-  method: 'oauth';
-  /** The `sub` claim of the token, when it carries one. */
-  subject: string | null;
-  scopes: string[];
-}
-
-export interface AuthFailure {
-  ok: false;
-  reason: AuthFailureReason;
-  status: 401 | 403;
-  /** Never surfaced to the caller; for server-side logging only. */
-  detail: string;
-  /** Scopes the caller must obtain, when the failure is about scope. */
-  requiredScopes: string[];
-}
-
-export type AuthResult = AuthSuccess | AuthFailure;
-
-function optionalEnv(name: string): string | undefined {
+function required(name: string): string {
   const value = process.env[name];
-  return value && value.trim() ? value.trim() : undefined;
-}
-
-export function isOAuthConfigured(): boolean {
-  return Boolean(optionalEnv('OAUTH_ISSUER') && optionalEnv('OAUTH_AUDIENCE'));
-}
-
-/**
- * Scopes a caller must hold. Empty when OAUTH_REQUIRED_SCOPE is unset, which
- * means any validly issued token for this audience is accepted.
- */
-export function requiredScopes(): string[] {
-  const raw = optionalEnv('OAUTH_REQUIRED_SCOPE');
-  return raw ? raw.split(/\s+/).filter(Boolean) : [];
-}
-
-/** The canonical URI of this MCP server, used as the expected token audience. */
-export function resourceIdentifier(): string {
-  const audience = optionalEnv('OAUTH_AUDIENCE');
-  if (!audience) {
-    throw new Error('OAUTH_AUDIENCE is not set');
-  }
-  return audience.replace(/\/+$/, '');
-}
-
-export function issuer(): string {
-  const value = optionalEnv('OAUTH_ISSUER');
   if (!value) {
-    throw new Error('OAUTH_ISSUER is not set');
+    throw new Error(`${name} is not set. Add it to the project's environment variables in Vercel.`);
   }
-  return value.replace(/\/+$/, '');
-}
-
-/** What the issuer's discovery document tells us about it. */
-export interface AuthServerMetadata {
-  /**
-   * The issuer exactly as the authorization server publishes it, which is what
-   * appears in the `iss` claim of its tokens. Auth0 publishes a trailing slash
-   * (`https://tenant.auth0.com/`) and most others do not, so the published form
-   * is kept verbatim rather than normalised.
-   */
-  issuer: string;
-  jwksUri: string;
+  return value;
 }
 
 /**
- * Asks the authorization server where its signing keys are and what it calls
- * itself.
- *
- * Providers disagree on both. WorkOS serves keys at `/oauth2/jwks` and Auth0 at
- * `/.well-known/jwks.json`; Auth0 puts a trailing slash on its issuer and WorkOS
- * does not. Rather than hard-code either, read the RFC 8414 document (falling
- * back to OpenID Connect Discovery) and take the provider at its word.
- *
- * OAUTH_JWKS_URI skips discovery for a provider that publishes neither document.
+ * This deployment's public origin. Pin MCP_PUBLIC_URL to the final domain:
+ * clients compare the issuer in the discovery documents against the URL they
+ * were given and reject a mismatch, and a passkey is bound to the hostname, so
+ * moving afterwards means registering a new one.
  */
-export async function discoverAuthServer(): Promise<AuthServerMetadata> {
-  const base = issuer();
-  const pinned = optionalEnv('OAUTH_JWKS_URI');
-
-  if (pinned) {
-    // No document to consult, so accept the configured issuer as published.
-    return { issuer: base, jwksUri: new URL(pinned).toString() };
-  }
-
-  const candidates = [
-    `${base}/.well-known/oauth-authorization-server`,
-    `${base}/.well-known/openid-configuration`,
-  ];
-
-  const failures: string[] = [];
-
-  for (const url of candidates) {
-    let document: unknown;
+export function publicOrigin(): string {
+  const configured = process.env.MCP_PUBLIC_URL;
+  if (configured) {
+    // Only the scheme and host are wanted. It is easy to paste the full
+    // endpoint URL here instead, and a path kept here would be doubled into
+    // every address the discovery documents publish, sending clients to
+    // endpoints that do not exist. A passkey follows the host alone, so
+    // trimming the path cannot invalidate one either.
     try {
-      const response = await fetch(url, { headers: { accept: 'application/json' } });
-      if (!response.ok) {
-        failures.push(`${url} returned ${response.status}`);
-        continue;
-      }
-      document = await response.json();
-    } catch (error) {
-      failures.push(`${url}: ${error instanceof Error ? error.message : 'unreachable'}`);
-      continue;
+      return new URL(configured).origin;
+    } catch {
+      return `https://${configured.replace(/^https?:\/\//, '').replace(/\/.*$/, '')}`;
     }
-
-    const metadata = document as { issuer?: unknown; jwks_uri?: unknown };
-
-    if (typeof metadata.jwks_uri !== 'string') {
-      failures.push(`${url} does not advertise a jwks_uri`);
-      continue;
-    }
-
-    // RFC 8414 requires the issuer in the document to match the one we asked
-    // about. Compare ignoring a trailing slash, since that is a formatting
-    // difference between providers rather than a different issuer, but keep the
-    // published form for validating tokens.
-    const published = typeof metadata.issuer === 'string' ? metadata.issuer : base;
-    if (published.replace(/\/+$/, '') !== base) {
-      failures.push(`${url} is published by ${published}, not ${base}`);
-      continue;
-    }
-
-    return { issuer: published, jwksUri: new URL(metadata.jwks_uri).toString() };
   }
-
-  throw new Error(`Could not reach the authorization server at ${base}. Tried: ${failures.join('; ')}`);
-}
-
-// Discovery and the key set are cached per issuer: the keys rate-limit their own
-// refetches, and the document rarely changes. Keyed so a config change in tests
-// does not reuse a stale entry.
-const serverCache = new Map<string, Promise<{ metadata: AuthServerMetadata; keys: JWTVerifyGetKey }>>();
-
-function authServer(): Promise<{ metadata: AuthServerMetadata; keys: JWTVerifyGetKey }> {
-  const cacheKey = `${issuer()}|${optionalEnv('OAUTH_JWKS_URI') ?? ''}`;
-  let existing = serverCache.get(cacheKey);
-  if (!existing) {
-    existing = discoverAuthServer()
-      .then((metadata) => ({ metadata, keys: createRemoteJWKSet(new URL(metadata.jwksUri)) }))
-      // A failed lookup must not be cached, or one outage would stick until the
-      // next deployment.
-      .catch((error) => {
-        serverCache.delete(cacheKey);
-        throw error;
-      });
-    serverCache.set(cacheKey, existing);
+  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) {
+    return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
   }
-  return existing;
-}
-
-/** Test seam: drops cached keys so a changed issuer takes effect. */
-export function resetKeyCache(): void {
-  serverCache.clear();
-}
-
-function extractBearer(authHeader: string | string[] | undefined): string | null {
-  const header = Array.isArray(authHeader) ? authHeader[0] : authHeader;
-  if (!header) {
-    return null;
-  }
-  // The scheme is case-insensitive per RFC 6750.
-  const match = /^Bearer\s+(.+)$/i.exec(header.trim());
-  return match ? match[1].trim() : null;
+  return 'http://localhost:3000';
 }
 
 /**
- * Scopes carried by a verified token. Handles both the space-delimited `scope`
- * string of RFC 8693 and the array-valued `scp` claim some providers emit.
+ * The canonical identifier every issued token is bound to. It is a function
+ * rather than a constant, because a constant would be fixed when this file is
+ * first imported, which during a build is before any environment variable
+ * exists.
  */
-function scopesFrom(payload: JWTPayload): string[] {
-  const scope = payload.scope;
-  if (typeof scope === 'string') {
-    return scope.split(/\s+/).filter(Boolean);
-  }
-  const scp = (payload as Record<string, unknown>).scp;
-  if (Array.isArray(scp)) {
-    return scp.filter((entry): entry is string => typeof entry === 'string');
-  }
-  if (typeof scp === 'string') {
-    return scp.split(/\s+/).filter(Boolean);
-  }
-  return [];
+export function mcpResource(): string {
+  return `${publicOrigin()}/api/mcp`;
 }
 
-export async function authenticate(
-  authHeader: string | string[] | undefined,
-): Promise<AuthResult> {
-  // Nothing configured means nothing can be verified. The endpoint is public,
-  // so it refuses everything rather than serving an unauthenticated caller.
-  if (!isOAuthConfigured()) {
-    console.error(
-      'MCP authentication is not configured: set OAUTH_ISSUER and OAUTH_AUDIENCE. ' +
-        'Every request is rejected until they are set.',
-    );
-    return {
-      ok: false,
-      reason: 'invalid_token',
-      status: 401,
-      detail: 'OAuth is not configured on this deployment',
-      requiredScopes: [],
-    };
-  }
+// The one scope that grants access to the tools. The mail, calendar and
+// reminder tools are registered together and are not split into a read half
+// and a write half, so advertising `icloud:read` and `icloud:write` would
+// promise a distinction the server does not actually enforce. What the server
+// will and will not do to a mailbox is decided by ALLOW_TRASH_JUNK_MOVES and
+// ALLOWED_MOVE_DESTINATIONS, which are the operator's settings, not the
+// client's to ask for.
+export const ICLOUD_SCOPE = 'icloud';
 
-  const token = extractBearer(authHeader);
-  if (!token) {
-    return {
-      ok: false,
-      reason: 'missing_token',
-      status: 401,
-      detail: 'No bearer token in the Authorization header',
-      requiredScopes: requiredScopes(),
-    };
+// Sign-in tables live in the same database as the mail and calendar tables, so
+// they carry a prefix. The sibling YNAB deployment already keeps its own
+// unprefixed set here, and the two cannot share them: each deployment signs its
+// tokens with its own BETTER_AUTH_SECRET, and the signing keys in `jwks` are
+// encrypted with it, so whichever wrote last would lock the other out.
+const TABLE_PREFIX = 'icloud_';
+
+function table(model: string): { modelName: string } {
+  return { modelName: `${TABLE_PREFIX}${model}` };
+}
+
+/**
+ * Which settings this deployment is missing, by name only. Nothing here reads a
+ * value, so the result is safe to serve publicly, and it turns "every page is a
+ * 500" into a list of what to go and set.
+ */
+export function settingsReport() {
+  const present = (name: string) => !!process.env[name];
+  const missing: string[] = [];
+
+  if (!present('BETTER_AUTH_SECRET')) missing.push('BETTER_AUTH_SECRET');
+  if (!present('MCP_OWNER_EMAIL')) missing.push('MCP_OWNER_EMAIL');
+  if (!present('POSTGRES_URL') && !present('DATABASE_URL')) {
+    missing.push('POSTGRES_URL or DATABASE_URL');
   }
+  if (!present('ICLOUD_EMAIL')) missing.push('ICLOUD_EMAIL');
+  if (!present('ICLOUD_APP_PASSWORD')) missing.push('ICLOUD_APP_PASSWORD');
+
+  return {
+    ok: missing.length === 0,
+    missing,
+    database: databaseSummary(),
+    // Not required, but worth seeing: without it the server names itself by
+    // whatever Vercel happens to call this deployment, and a passkey follows
+    // the hostname.
+    public_url: process.env.MCP_PUBLIC_URL ? publicOrigin() : null,
+    resource: mcpResource(),
+    table_prefix: TABLE_PREFIX,
+    // Only meaningful before the first passkey exists. Once one does,
+    // registration is closed whether or not this is still set.
+    setup_code_set: present('MCP_SETUP_CODE'),
+  };
+}
+
+/**
+ * Describes the database connection without revealing anything secret: which
+ * variable it came from, and the host and port it points at. The host matters,
+ * because Supabase's direct connection is reachable only over IPv6 and a Vercel
+ * function is not, so it has to be the pooler.
+ */
+function databaseSummary() {
+  const source = process.env.POSTGRES_URL
+    ? 'POSTGRES_URL'
+    : process.env.DATABASE_URL
+      ? 'DATABASE_URL'
+      : null;
+  if (!source) return { source: null };
 
   try {
-    const { metadata, keys } = await authServer();
-    const { payload } = await jwtVerify(token, keys, {
-      // The issuer exactly as the provider publishes it, not as it was typed
-      // into the environment.
-      issuer: metadata.issuer,
-      // Binds the token to this server. Without it, a token minted for a
-      // different resource behind the same issuer would be accepted here.
-      audience: resourceIdentifier(),
-    });
-
-    const granted = scopesFrom(payload);
-    const needed = requiredScopes();
-    const missing = needed.filter((scope) => !granted.includes(scope));
-
-    if (missing.length > 0) {
-      return {
-        ok: false,
-        reason: 'insufficient_scope',
-        status: 403,
-        detail: `Token is missing scope: ${missing.join(' ')}`,
-        requiredScopes: needed,
-      };
-    }
-
+    const url = new URL(process.env[source] as string);
+    const local = ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
     return {
-      ok: true,
-      method: 'oauth',
-      subject: typeof payload.sub === 'string' ? payload.sub : null,
-      scopes: granted,
+      source,
+      host: url.hostname,
+      port: url.port || '5432',
+      looks_pooled: local ? null : url.hostname.includes('pooler.') || url.port === '6543',
+      tls: local
+        ? 'not used, the database is on this machine'
+        : url.searchParams.get('sslmode') === 'verify-full'
+          ? 'encrypted, server identity verified'
+          : 'encrypted, server identity not verified',
     };
+  } catch {
+    return { source, host: null, note: 'could not be read as a connection string' };
+  }
+}
+
+/**
+ * Actually opens a connection and runs the cheapest possible query. A settings
+ * list saying everything is present is not much use when the reason nothing
+ * works is that the database cannot be reached, and the driver's complaint is
+ * otherwise buried in a log someone has to go and find.
+ */
+export async function databaseCheck(): Promise<{
+  reachable: boolean;
+  error?: string;
+  code?: string | null;
+}> {
+  try {
+    const result = await database().query('select 1 as ok');
+    return { reachable: result.rows?.[0]?.ok === 1 };
   } catch (error) {
-    // Not a valid token for this issuer, and there is nothing else to try.
+    const cause = error as { message?: string; code?: string };
     return {
-      ok: false,
-      reason: 'invalid_token',
-      status: 401,
-      detail: error instanceof Error ? error.message : 'Token verification failed',
-      requiredScopes: requiredScopes(),
+      reachable: false,
+      // The message and code only. A connection string carries a password, and
+      // this endpoint is public.
+      error: String(cause?.message || error).replace(
+        /postgres(ql)?:\/\/[^\s]*/gi,
+        '[connection string]',
+      ),
+      code: cause?.code || null,
     };
   }
 }
 
 /**
- * The `WWW-Authenticate` value for a rejected request. Points clients at the
- * protected resource metadata document so they can discover where to sign in.
+ * Supabase's pooler, not the direct database port. Vercel functions start and
+ * stop constantly, and one connection per invocation would exhaust the limit
+ * within a day. The Vercel integration sets POSTGRES_URL; DATABASE_URL is the
+ * manual fallback.
+ *
+ * One wrinkle deserves stating plainly. Postgres connection strings use
+ * `sslmode`, and every common client reads `require` as "encrypt this
+ * connection". The driver used here reads it as "encrypt it and check the
+ * server's certificate against the ones this machine already trusts", which
+ * Supabase's is not, so the connection fails outright. Adding the compatibility
+ * flag restores the meaning the connection string was written with. Traffic is
+ * encrypted either way; what is not checked is the server's identity, which is
+ * how Supabase is normally reached. /api/status says which of the two is in use
+ * rather than leaving it implied.
  */
-export function challengeHeader(failure: AuthFailure, metadataUrl: string): string {
-  const parts = [`Bearer resource_metadata="${metadataUrl}"`];
-
-  if (failure.reason === 'insufficient_scope') {
-    parts.push('error="insufficient_scope"');
-  } else if (failure.reason === 'invalid_token') {
-    parts.push('error="invalid_token"');
+function connectionString(): string {
+  const raw = process.env.POSTGRES_URL || required('DATABASE_URL');
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return raw;
   }
 
-  if (failure.requiredScopes.length > 0) {
-    parts.push(`scope="${failure.requiredScopes.join(' ')}"`);
-  }
+  if (['localhost', '127.0.0.1', '::1'].includes(url.hostname)) return raw;
 
-  return parts.join(', ');
+  if (!url.searchParams.has('sslmode')) url.searchParams.set('sslmode', 'require');
+  if (url.searchParams.get('sslmode') !== 'verify-full') {
+    url.searchParams.set('uselibpqcompat', 'true');
+  }
+  return url.toString();
 }
+
+let pool: Pool | undefined;
+function database(): Pool {
+  if (!pool) {
+    pool = new Pool({
+      connectionString: connectionString(),
+      max: 1,
+      idleTimeoutMillis: 10_000,
+      // A Vercel function is short-lived, and a connection that hangs should
+      // surface as an error rather than sitting there until the request dies.
+      connectionTimeoutMillis: 10_000,
+    });
+  }
+  return pool;
+}
+
+function ownerEmail(): string {
+  return (process.env.MCP_OWNER_EMAIL || '').trim().toLowerCase();
+}
+
+/**
+ * Compares two strings without leaking, through timing, how much of the setup
+ * code was right.
+ */
+function secretsMatch(a: unknown, b: unknown): boolean {
+  const left = Buffer.from(String(a));
+  const right = Buffer.from(String(b));
+  if (left.length !== right.length) return false;
+  return timingSafeEqual(left, right);
+}
+
+/**
+ * The hostname WebAuthn binds a passkey to. A passkey registered against one
+ * hostname will not work on another, which is what makes it phishing-resistant.
+ */
+function relyingPartyId(): string {
+  return new URL(publicOrigin()).hostname;
+}
+
+export function createAuth() {
+  return betterAuth({
+    appName: 'iCloud MCP',
+    baseURL: publicOrigin(),
+    secret: required('BETTER_AUTH_SECRET'),
+    database: database(),
+    emailAndPassword: { enabled: false },
+    // The four core tables, renamed so they sit beside the sibling
+    // deployment's rather than on top of them.
+    user: table('user'),
+    session: table('session'),
+    account: table('account'),
+    verification: table('verification'),
+    // Nothing else can create an account: the passkey registration hook below
+    // is the only way in, and it closes after the first passkey.
+    advanced: { disableCSRFCheck: false },
+    plugins: [
+      // Signs access and ID tokens, and serves the key set the MCP endpoint
+      // verifies them against.
+      jwt({ schema: { jwks: table('jwks') } }),
+
+      mcp({
+        resource: mcpResource(),
+        loginPage: '/sign-in',
+        consentPage: '/consent',
+        scopes: ['openid', 'profile', 'email', 'offline_access', ICLOUD_SCOPE],
+        advertisedMetadata: {
+          scopes_supported: ['openid', 'offline_access', ICLOUD_SCOPE],
+        },
+        // An hour-long access token with a rotating refresh token. Claude
+        // refreshes both ahead of expiry and again on a 401, so the reuse
+        // window below keeps two overlapping refreshes from revoking the whole
+        // chain, which is what forces someone to reconnect the server by hand.
+        accessTokenExpiresIn: 3600,
+        refreshTokenExpiresIn: 7_776_000,
+        refreshTokenReuseInterval: 30,
+        storeTokens: 'hashed',
+        // Dynamic registration stays on for clients that predate metadata
+        // documents.
+        allowDynamicClientRegistration: true,
+        allowUnauthenticatedClientRegistration: true,
+        clientRegistrationDefaultScopes: ['openid', 'offline_access', ICLOUD_SCOPE],
+        clientRegistrationAllowedScopes: ['profile', 'email'],
+        clientRegistrationDefaultResources: [mcpResource()],
+        schema: {
+          oauthClient: table('oauthClient'),
+          oauthResource: table('oauthResource'),
+          oauthClientResource: table('oauthClientResource'),
+          oauthRefreshToken: table('oauthRefreshToken'),
+          oauthAccessToken: table('oauthAccessToken'),
+          oauthConsent: table('oauthConsent'),
+          oauthClientAssertion: table('oauthClientAssertion'),
+        },
+      }),
+
+      // Lets a client identify itself by a metadata document it hosts, so
+      // nothing is registered and no redirect URL is ever typed into a
+      // dashboard. The Node transport resolves the hostname once, refuses
+      // private addresses and follows no redirects, which is what stops a
+      // client ID pointing the server at something on its own network.
+      cimd({
+        fetchClientMetadataResource,
+        metadataProfile: 'mcp-2026-07-28',
+      }),
+
+      passkey({
+        rpID: relyingPartyId(),
+        rpName: 'iCloud MCP',
+        origin: publicOrigin(),
+        schema: { passkey: table('passkey') },
+        registration: {
+          // Registration happens before there is anyone to be signed in as, so
+          // the setup code stands in for a session exactly once.
+          requireSession: false,
+          resolveUser: async ({ ctx, context }: { ctx: any; context?: unknown }) => {
+            const setupCode = process.env.MCP_SETUP_CODE;
+            if (!setupCode) {
+              throw ctx.error('FORBIDDEN', {
+                message: 'MCP_SETUP_CODE is not set, so no passkey can be registered.',
+              });
+            }
+            if (!context || !secretsMatch(context, setupCode)) {
+              throw ctx.error('FORBIDDEN', { message: 'That setup code is not right.' });
+            }
+
+            // One owner, one passkey. This looks at the whole table rather than
+            // at one account, so re-running setup cannot add a second way in
+            // under a different address either.
+            const anyPasskey = await ctx.context.adapter.findMany({
+              model: 'passkey',
+              limit: 1,
+            });
+            if (anyPasskey.length > 0) {
+              throw ctx.error('FORBIDDEN', {
+                message:
+                  'A passkey is already registered. Remove it from the database before registering another.',
+              });
+            }
+
+            const email = ownerEmail();
+            if (!email) {
+              throw ctx.error('FORBIDDEN', { message: 'MCP_OWNER_EMAIL is not set.' });
+            }
+
+            let user = await ctx.context.adapter.findOne({
+              model: 'user',
+              where: [{ field: 'email', value: email }],
+            });
+
+            if (!user) {
+              user = await ctx.context.internalAdapter.createUser({
+                email,
+                name: 'Owner',
+                emailVerified: true,
+              });
+            }
+
+            return { id: user.id, name: email, displayName: 'iCloud MCP owner' };
+          },
+        },
+      }),
+    ],
+  });
+}
+
+export type Auth = ReturnType<typeof createAuth>;
+
+let instance: Auth | undefined;
+
+/**
+ * A stand-in for the authorization server that builds it the first time
+ * anything is actually read from it. Next.js imports every route while it
+ * builds, before any environment variable exists, and building the real thing
+ * at that moment would read BETTER_AUTH_SECRET and fail the build.
+ */
+export const auth: Auth = new Proxy({} as Auth, {
+  get(_target, property: string | symbol) {
+    if (!instance) instance = createAuth();
+    const value = (instance as unknown as Record<string | symbol, unknown>)[property];
+    return typeof value === 'function' ? value.bind(instance) : value;
+  },
+});

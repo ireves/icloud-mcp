@@ -1,6 +1,17 @@
 .DS_Store
 node_modules/
-.env
-.vercel/
 dist/
 .worktrees/
+
+# Local settings. Never commit these: they carry the signing secret and the
+# database password.
+.env
+.env.local
+.env*.local
+
+# Next.js build output and the type declarations it regenerates.
+.next/
+next-env.d.ts
+*.tsbuildinfo
+
+.vercel/

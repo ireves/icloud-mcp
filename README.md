@@ -20,33 +20,55 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 |---|---|
 | `ICLOUD_EMAIL` | Your iCloud email address |
 | `ICLOUD_APP_PASSWORD` | The app-specific password from step 1 |
-| `OAUTH_ISSUER` | The base URL of your authorization server, e.g. `https://your-tenant.eu.auth0.com`. A trailing slash makes no difference; the server reads the exact form from the provider itself. Required for OAuth sign-in. |
-| `OAUTH_AUDIENCE` | The canonical URL of this MCP server, e.g. `https://<your-deployment>/api/mcp`. Access tokens are only accepted if they were issued for this audience. Required for OAuth sign-in. |
-| `OAUTH_REQUIRED_SCOPE` | Optional. Space-separated scopes a token must carry, e.g. `icloud:read icloud:write`. When unset, any valid token for this audience is accepted. |
-| `OAUTH_JWKS_URI` | Optional. The signing key address is discovered from the issuer automatically, so this is only needed for a provider that publishes no discovery document. |
+| `MCP_PUBLIC_URL` | The address this server will finally live at, e.g. `https://icloud-mcp.example.com`. Scheme and host only; any path is ignored. Set it before you register a passkey: a passkey is tied to the hostname, and clients reject a server that names itself differently from the address they were given. |
+| `BETTER_AUTH_SECRET` | Signs the tokens this server issues. Generate once with `openssl rand -base64 48`. Changing it signs you out and invalidates every connector. |
+| `MCP_OWNER_EMAIL` | Your email address. It labels the single owner account; nothing is ever sent to it. |
+| `MCP_SETUP_CODE` | Lets you register the first passkey, once. Generate one with `openssl rand -hex 24`. It stops working the moment a passkey exists, so there is nothing to rotate. |
+| `POSTGRES_URL` | The Postgres connection string for the sign-in tables. Set automatically when you connect the Supabase integration in Vercel's Storage tab. Use the pooler connection (port 6543), not the direct one: the direct host answers only over IPv6 and a Vercel function has none. `DATABASE_URL` is read instead when the integration is not in use. |
+| `CRON_SECRET` | Optional. When set, the daily keep-alive route answers only Vercel's own scheduled request. Generate it like the others. |
 | `ALLOWED_MOVE_DESTINATIONS` | Optional. A comma-separated list of folders a message may be moved into, e.g. `Archive,Receipts,Newsletters,Work/Clients`. `INBOX` is always allowed on top of the list. Leaving it unset allows any folder except Trash and Junk, which is the less safe choice. |
 | `NOTION_EXCEPTIONS_TOKEN` | Optional. A read-only Notion integration secret, used to read the "Email Sorting Exceptions" database. Leave it unset and the feature is off: `list_exceptions` reports that it is not configured, and no exception is enforced on moves. See [Sorting exceptions](#sorting-exceptions). |
 | `NOTION_EXCEPTIONS_DATA_SOURCE_ID` | Optional. The data source to read those rules from. Defaults to `f2ebf247-9368-498f-86a9-3341260874e1`. |
-| `SUPABASE_URL` | The API URL of the Supabase project used to track moves for undo and to remember mail scanning progress. Set automatically, under this name, when you connect the Supabase integration to this project in Vercel's Storage tab. |
+| `SUPABASE_URL` | The API URL of the Supabase project used to track moves for undo and to remember mail scanning progress. Set automatically, under this name, by the Vercel integration. |
 | `SUPABASE_SECRET_KEY` | The full-access key for the same Supabase project, in the form `sb_secret_...`. Set automatically by the Vercel integration. It bypasses row level security, so it must stay server-side and must never reach a browser. |
 | `SUPABASE_SERVICE_ROLE_KEY` | The older name for the same thing, used by a Supabase project set up by hand rather than through Vercel. Set one key or the other; `SUPABASE_SECRET_KEY` wins if both are present. |
 
-See `.env.example` for local development — copy it to `.env` and fill in real values (never commit `.env`).
+See `.env.example` for local development — copy it to `.env.local` and fill in real values (never commit it).
 
-### 3. Deploy
+### 3. Create the sign-in tables
+
+The server keeps its accounts, passkeys, signing keys and issued tokens in Postgres. `supabase/migrations/20260919120000_better_auth_icloud_tables.sql` creates the thirteen tables it needs, each named with an `icloud_` prefix so they sit beside anything else in the same database rather than on top of it. Apply that file to your project once.
+
+To regenerate it after a library upgrade, point the schema tool at a database and let it work out the difference:
+
+```bash
+npm run auth:migrate
+```
+
+Every one of those tables has row level security switched on with no policies at all. The server connects as the table owner and so is unaffected, while Supabase's public REST API, which is not the owner, is left with no way to read a single row.
+
+### 4. Deploy
 
 ```bash
 npm install
 npx vercel deploy --prod
 ```
 
-Note the deployed URL, e.g. `https://icloud-mcp-yourname.vercel.app`. The MCP endpoint is at `/api/mcp`.
+The Vercel project must be set to the **Next.js** framework preset, and Vercel Authentication (Project Settings → Deployment Protection) must be off for whichever address you hand to a client. It puts a Vercel sign-in page in front of every request, which a connector cannot get past.
 
-### 4. Add as a Claude custom connector
+Then open `https://<your-deployment>/api/status`. It answers `200` when the settings are all present and the database actually answers, and `503` with the specific reason when not. It reports names and hostnames only, never values, so it is safe to leave public.
 
-In Claude's connector settings, add a custom connector pointing at `https://<your-deployment>/api/mcp`. Claude discovers the sign-in step by itself: it gets a 401, reads `/.well-known/oauth-protected-resource`, and sends you to your authorization server to sign in. Leave the bearer token field blank.
+### 5. Register your passkey
 
-OAuth is the only way in. Until `OAUTH_ISSUER` and `OAUTH_AUDIENCE` are both set, the server rejects every request rather than running unprotected, so set them before you deploy.
+Open `https://<your-deployment>/sign-in`, choose **Set up a new deployment**, and enter your `MCP_SETUP_CODE`. That registers one passkey against the deployment's hostname.
+
+This works exactly once. Once a passkey exists the server refuses to register another, whatever code is offered, so the setup code becomes inert rather than remaining a way in. To replace a lost passkey, delete the row from `icloud_passkey` and register again.
+
+### 6. Add as a Claude custom connector
+
+In Claude's connector settings, add a custom connector pointing at `https://<your-deployment>/api/mcp`. Leave every other field blank: there is no client ID to paste, no secret, and no callback URL to register anywhere.
+
+Claude works the rest out by itself. It gets a `401`, reads the discovery documents, identifies itself by the metadata document it publishes, sends you here to sign in with your passkey, shows you what it is asking for, and comes back with a token. `/mcp` works as well as `/api/mcp`, in case you type the short form.
 
 Test each tool manually before wiring up a scheduled task.
 
@@ -55,45 +77,56 @@ Test each tool manually before wiring up a scheduled task.
 Two separate things are being protected, and they do not use the same mechanism:
 
 - **Your iCloud account** is reached with `ICLOUD_APP_PASSWORD`, an app-specific password from appleid.apple.com. Apple offers no OAuth route into iCloud Mail, Calendar or Reminders, so this stays as it is.
-- **This server's public URL** is protected by OAuth, and by nothing else. The server acts as an OAuth 2.1 resource server, as described in the [MCP authorization spec](https://modelcontextprotocol.io/specification/draft/basic/authorization). It validates access tokens but never issues them; signing people in is your authorization server's job.
+- **This server's public URL** is protected by OAuth 2.1, and by nothing else. The server is its own authorization server: it signs you in and issues its own tokens, as described in the [MCP authorization spec](https://modelcontextprotocol.io/specification/draft/basic/authorization).
 
-### Choosing an authorization server
+### No outside provider
 
-Any provider that issues JWT access tokens and publishes OpenID discovery metadata will work, including Auth0, Clerk, WorkOS, Stytch and Descope. What the provider has to do:
+Earlier versions pointed at a provider such as Auth0 and only checked the tokens it issued. That is gone. There is no provider dashboard to keep in step with this deployment, no client ID or secret to copy between two places, and no redirect URL to re-register when a client changes one.
 
-1. Register your MCP URL, e.g. `https://<your-deployment>/api/mcp`, as the thing tokens are issued for. Providers name this differently: Auth0 calls it an API, WorkOS calls it a resource indicator (under Connect → Configuration). That identifier becomes `OAUTH_AUDIENCE`.
+What replaced it is a passkey. Signing in is a fingerprint or face check against a key that only works on this exact hostname, so a lookalike site has nothing to collect: there is no password to phish and no code to read out.
 
-   This step is not optional. A token that is not addressed to this server is rejected, and several providers, WorkOS among them, leave the `aud` claim off entirely until you register the URL.
-2. Sign tokens with an asymmetric algorithm (RS256 or ES256). The server finds the public keys by reading the issuer's discovery document, so the key address itself needs no configuration.
-3. Allow the client registration that Claude needs, or skip it: for a custom connector you can paste a client ID into Claude's advanced settings instead. If you prefer automatic registration, enable Client ID Metadata Documents or Dynamic Client Registration, whichever your provider offers.
-4. Register `https://claude.ai/api/mcp/auth_callback` as an allowed callback URL.
+### How a client identifies itself
 
-### What the server does on each request
+Two ways, both automatic, and neither needs anything typed into a dashboard:
 
-On startup the server asks your provider where its signing keys are and what it calls itself, by reading the provider's own discovery document. That covers the differences between providers: WorkOS publishes keys at `/oauth2/jwks` and Auth0 at `/.well-known/jwks.json`, and Auth0 puts a trailing slash on its issuer while most others do not. Nothing about that needs configuring.
+- **Client ID Metadata Documents.** The client publishes a small JSON file describing itself, and the URL of that file is its client ID. This is what the 2026-07-28 revision of the MCP specification asks for, and what Claude and ChatGPT prefer. The server fetches that document over a transport that resolves the hostname once, refuses private addresses and follows no redirects, so a client ID cannot be used to point this server at something on its own network.
+- **Dynamic client registration**, left on for clients that predate the above.
 
-Then, per request:
+Either way, the consent screen names the client and, just as importantly, the address your browser will be sent back to. A local address gets a warning of its own, because any program on your machine could be the one asking.
 
-1. No token, or a token it cannot verify, gets a `401` with a `WWW-Authenticate` header naming `/.well-known/oauth-protected-resource`.
-2. That document, served by `api/oauth-protected-resource.ts`, names your authorization server. The client signs you in there and comes back with an access token.
-3. Every later request is checked for signature, issuer, audience and (if set) scope. A valid token missing a required scope gets a `403` naming the scopes needed, so the client can ask for them.
+### Tokens
 
-Tokens still travel in the `Authorization: Bearer` header. The change is that they are short-lived and issued after a sign-in, rather than one fixed string pasted into a settings field.
+An access token lasts an hour and is bound to `https://<your-deployment>/api/mcp` as its audience, so a token issued for anything else is refused here. Alongside it comes a refresh token lasting 90 days, which is rotated every time it is used.
+
+One refresh token may be replayed within 30 seconds of its rotation. Claude refreshes both ahead of expiry and again on a `401`, and those two can overlap; a stricter window treats the second as a stolen token, revokes the whole chain, and leaves you reconnecting the server by hand.
+
+### Where the discovery documents live
+
+Clients look in several places, in an order the specification fixes, and all of them answer:
+
+- `/.well-known/oauth-protected-resource`, and the same with the MCP path appended
+- `/.well-known/oauth-authorization-server`, bare and with the issuer path appended
+- `/.well-known/openid-configuration`, both ways
+
+The document describing the protected resource lives at the site root, while the ones describing the authorization server live under its own prefix at `/api/auth`. They are not in the same place, and that is correct rather than an oversight.
 
 ### Checking your setup
 
 ```bash
-npm run check:oauth                    # checks the configuration and the issuer
-npm run check:oauth -- <access-token>  # also checks a real token end to end
+curl https://<your-deployment>/api/status
 ```
 
-It reports what clients will discover, whether the signing keys are reachable, and, given a token, whether the audience lines up. The audience mismatch above is the most common cause of a connector that signs in and then fails.
+It lists any setting that is missing by name, describes the database connection by host and port, and actually opens a connection and runs a query, reporting the driver's own complaint when that fails. It answers `503` until both halves are right. Nothing in it reveals a value.
+
+### Keeping the database awake
+
+A free Supabase project pauses itself after seven days with no activity, which would break every connector until someone opened the dashboard. `vercel.json` schedules one trivial query a day against `/api/cron/keepalive`, which is well inside the once-a-day limit on Vercel's Hobby plan.
 
 ### No shared secret
 
-There is no `MCP_AUTH_TOKEN` and no other fixed-string route in. A single long-lived secret that unlocks every tool cannot be scoped to a subset of them, attributed to whoever used it, or expired after a leak, and anything that reads it once has the whole mailbox. If you set that variable in an earlier version, delete it from Vercel; it now unlocks nothing.
+There is no `MCP_AUTH_TOKEN` and no other fixed-string route in. A single long-lived secret that unlocks every tool cannot be scoped to a subset of them, attributed to whoever used it, or expired after a leak, and anything that reads it once has the whole mailbox. If you set that variable in an earlier version, delete it from Vercel; it now unlocks nothing. The same goes for `OAUTH_ISSUER`, `OAUTH_AUDIENCE`, `OAUTH_REQUIRED_SCOPE` and `OAUTH_JWKS_URI`, which this version no longer reads.
 
-Anything that cannot open a browser, a scheduled run included, needs a token from your authorization server instead. Most providers issue one to a machine caller directly, usually under a name like "machine to machine" or "client credentials".
+Anything that cannot open a browser still needs a token, which means completing the passkey sign-in once in a browser and letting the client refresh from there.
 
 ## Local testing
 

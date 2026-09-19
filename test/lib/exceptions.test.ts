@@ -96,7 +96,8 @@ describe('getExceptions — the request', () => {
     process.env.NOTION_EXCEPTIONS_DATA_SOURCE_ID = 'another-data-source';
     const fetchMock = stubNotion({ results: [], has_more: false });
     await getExceptions();
-    expect(fetchMock.mock.calls[0][0]).toBe('https://api.notion.com/v1/data_sources/another-data-source/query');
+    const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://api.notion.com/v1/data_sources/another-data-source/query');
   });
 
   it('rejects with a readable error when the token is not set', async () => {
