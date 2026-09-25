@@ -1,6 +1,7 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { convert } from 'html-to-text';
+import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import type { MailboxInfo, MessageDetail, MessageSummary } from './types.js';
 import {
   acquireUndoLock,
@@ -942,6 +943,93 @@ export async function flagMessage(params: FlagMessageParams): Promise<void> {
     } finally {
       lock.release();
     }
+  } finally {
+    await client.logout();
+  }
+}
+
+export interface SaveDraftParams {
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  body: string;
+  /** The message this draft replies to, so Mail threads it with the original. */
+  replyTo?: { folder: string; uid: number };
+}
+
+export interface SaveDraftResult {
+  folder: string;
+  uid?: number;
+}
+
+/**
+ * The Drafts folder, found by its SPECIAL-USE marker, or by name when the
+ * server does not report one. Drafts are only ever written here, so this is
+ * also what keeps the tool from filing mail anywhere else.
+ */
+export function findDraftsFolder(mailboxes: MailboxListEntry[]): MailboxListEntry | null {
+  return (
+    mailboxes.find((m) => m.specialUse === '\\Drafts') ??
+    mailboxes.find((m) => m.specialUse === undefined && m.name === 'Drafts') ??
+    null
+  );
+}
+
+/** The Message-ID and References of the message being replied to. */
+async function fetchReplyHeaders(
+  client: ImapFlow,
+  folder: string,
+  uid: number,
+): Promise<{ inReplyTo?: string; references?: string[] }> {
+  const lock = await client.getMailboxLock(folder);
+  try {
+    const meta = await client.fetchOne(String(uid), { envelope: true, headers: ['references'] }, { uid: true });
+    if (!meta) {
+      throw new Error(`Message uid ${uid} not found in folder ${folder}`);
+    }
+    const messageId = meta.envelope?.messageId;
+    if (!messageId) return {};
+    const referencesHeader = meta.headers ? meta.headers.toString('utf8').replace(/^references:/i, '') : '';
+    const references = referencesHeader.match(/<[^<>\s]+>/g) ?? [];
+    return { inReplyTo: messageId, references: [...references, messageId] };
+  } finally {
+    lock.release();
+  }
+}
+
+/**
+ * Saves a new message in the Drafts folder, marked as a draft. Nothing is
+ * sent: the draft waits in Mail until the operator reviews and sends it.
+ */
+export async function saveDraft(params: SaveDraftParams): Promise<SaveDraftResult> {
+  const from = requireEnv('ICLOUD_EMAIL');
+  const client = getClient();
+  await client.connect();
+  try {
+    const drafts = findDraftsFolder(await client.list());
+    if (!drafts) {
+      throw new Error('No Drafts folder was found in this mail account, so the draft could not be saved.');
+    }
+
+    const reply = params.replyTo ? await fetchReplyHeaders(client, params.replyTo.folder, params.replyTo.uid) : {};
+
+    const mail = new MailComposer({
+      from,
+      to: params.to,
+      cc: params.cc,
+      bcc: params.bcc,
+      subject: params.subject,
+      text: params.body,
+      inReplyTo: reply.inReplyTo,
+      references: reply.references,
+    }).compile();
+    // A draft keeps its Bcc line so it is still there when the operator opens it.
+    mail.keepBcc = true;
+    const source = await mail.build();
+
+    const result = await client.append(drafts.path, source, ['\\Draft', '\\Seen']);
+    return { folder: drafts.path, uid: result ? result.uid : undefined };
   } finally {
     await client.logout();
   }

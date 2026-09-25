@@ -11,6 +11,7 @@ import {
   markScanned,
   moveMessage,
   reconcileFlagged,
+  saveDraft,
   undoMove,
 } from '../lib/imap.js';
 import { getExceptions, isExceptionsConfigured } from '../lib/exceptions.js';
@@ -26,6 +27,7 @@ import {
   moveMessageOutput,
   okOutput,
   reconcileFlaggedOutput,
+  saveDraftOutput,
   undoMoveOutput,
 } from './schemas.js';
 import { wrapUntrusted } from '../lib/untrusted.js';
@@ -250,6 +252,49 @@ export function registerMailTools(server: McpServer): void {
             ? { ok: true, operation_id: operationId, undoable_for_days: 7 }
             : { ok: true, note: 'Source and destination were the same folder; no move was performed.' },
         );
+      } catch (error) {
+        return toErrorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'save_draft',
+    {
+      title: 'Save Email Draft',
+      description:
+        'Writes a plain-text email and saves it in the Drafts folder for the operator to review and send themselves. ' +
+        'This never sends mail: there is no tool for sending, and the draft stays in Drafts until a person sends it from Mail. ' +
+        'To reply to a message, pass its folder and UID as reply_to_folder and reply_to_uid so Mail shows the draft in the same conversation; ' +
+        'the recipients and subject still have to be given in full (use get_message to see who sent the original).',
+      inputSchema: {
+        to: z.array(z.email()).min(1).max(50).describe('Recipient addresses'),
+        cc: z.array(z.email()).max(50).optional().describe('Cc addresses'),
+        bcc: z.array(z.email()).max(50).optional().describe('Bcc addresses'),
+        subject: z.string().max(900).describe('Subject line'),
+        body: z.string().max(100_000).describe('Plain-text body'),
+        reply_to_folder: z.string().optional().describe('Folder of the message being replied to'),
+        reply_to_uid: z.number().int().positive().optional().describe('UID of the message being replied to'),
+      },
+      outputSchema: saveDraftOutput,
+    },
+    async (args) => {
+      try {
+        if ((args.reply_to_folder === undefined) !== (args.reply_to_uid === undefined)) {
+          return toErrorResult(new Error('reply_to_folder and reply_to_uid must be given together.'));
+        }
+        const result = await saveDraft({
+          to: args.to,
+          cc: args.cc,
+          bcc: args.bcc,
+          subject: args.subject,
+          body: args.body,
+          replyTo:
+            args.reply_to_folder !== undefined && args.reply_to_uid !== undefined
+              ? { folder: args.reply_to_folder, uid: args.reply_to_uid }
+              : undefined,
+        });
+        return toResult({ ok: true, folder: result.folder, uid: result.uid });
       } catch (error) {
         return toErrorResult(error);
       }

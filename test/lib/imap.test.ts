@@ -9,6 +9,7 @@ const mockClient = vi.hoisted(() => ({
   fetchOne: vi.fn(),
   search: vi.fn(),
   fetch: vi.fn(),
+  append: vi.fn(),
   mailbox: { uidValidity: 1000n } as { uidValidity: bigint; uidNext?: number } | false,
 }));
 
@@ -596,5 +597,86 @@ describe('mark_scanned — checks marks against the folder\'s current numbering'
 
     await expect(imap.markScanned({ folder: 'INBOX', throughUid: 120 })).rejects.toThrow(/\(none\)/);
     expect(mockScanProgress.advanceLastSeenUid).not.toHaveBeenCalled();
+  });
+});
+
+describe('saveDraft', () => {
+  it('saves the message in Drafts, marked as a draft, and sends nothing', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([
+      { path: 'INBOX', name: 'INBOX' },
+      { path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' },
+    ]);
+    mockClient.append.mockResolvedValue({ destination: 'Drafts', uid: 42 });
+
+    const result = await imap.saveDraft({
+      to: ['someone@example.com'],
+      bcc: ['hidden@example.com'],
+      subject: 'Hello',
+      body: 'Hi there',
+    });
+
+    expect(result).toEqual({ folder: 'Drafts', uid: 42 });
+    const [path, source, flags] = mockClient.append.mock.calls[0];
+    expect(path).toBe('Drafts');
+    expect(flags).toEqual(['\\Draft', '\\Seen']);
+    const text = source.toString();
+    expect(text).toContain('From: test@icloud.com');
+    expect(text).toContain('To: someone@example.com');
+    expect(text).toContain('Bcc: hidden@example.com');
+    expect(text).toContain('Subject: Hello');
+    expect(text).toContain('Hi there');
+  });
+
+  it('cannot be made to add a header through the subject', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' }]);
+    mockClient.append.mockResolvedValue({ destination: 'Drafts' });
+
+    await imap.saveDraft({ to: ['someone@example.com'], subject: 'Hi\r\nBcc: evil@example.com', body: 'x' });
+
+    const text = mockClient.append.mock.calls[0][1].toString();
+    expect(text).not.toMatch(/^Bcc:/m);
+  });
+
+  it('threads a reply with the original message', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' }]);
+    mockClient.fetchOne.mockResolvedValue({
+      envelope: { messageId: '<orig@example.com>' },
+      headers: Buffer.from('References: <first@example.com>\r\n'),
+    });
+    mockClient.append.mockResolvedValue({ destination: 'Drafts', uid: 7 });
+
+    await imap.saveDraft({
+      to: ['someone@example.com'],
+      subject: 'Re: Hello',
+      body: 'Thanks',
+      replyTo: { folder: 'INBOX', uid: 3 },
+    });
+
+    const text = mockClient.append.mock.calls[0][1].toString();
+    expect(text).toContain('In-Reply-To: <orig@example.com>');
+    expect(text).toContain('References: <first@example.com> <orig@example.com>');
+  });
+
+  it('finds Drafts by name when the server does not mark it', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'INBOX.Drafts', name: 'Drafts' }]);
+    mockClient.append.mockResolvedValue({ destination: 'INBOX.Drafts' });
+
+    const result = await imap.saveDraft({ to: ['someone@example.com'], subject: 'Hi', body: 'x' });
+
+    expect(result.folder).toBe('INBOX.Drafts');
+  });
+
+  it('refuses when there is no Drafts folder', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'INBOX', name: 'INBOX' }]);
+
+    await expect(
+      imap.saveDraft({ to: ['someone@example.com'], subject: 'Hi', body: 'x' }),
+    ).rejects.toThrow(/No Drafts folder/);
+    expect(mockClient.append).not.toHaveBeenCalled();
   });
 });

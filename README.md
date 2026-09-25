@@ -153,6 +153,7 @@ Both read from a local `.env` file and print what they find. Run them separately
 | `mark_message` | Mark a message read/unread |
 | `list_exceptions` | List the operator's standing sorting rules, read from Notion |
 | `move_message` | Move a message to another folder (Trash/Junk, the destination allowlist and the sorting exceptions are all enforced by the server); returns an `operation_id` you can pass to `undo_move` |
+| `save_draft` | Save a plain-text email in the Drafts folder for you to review and send yourself; can be threaded as a reply to an existing message. Nothing is ever sent |
 | `flag_message` | Flag/unflag a message |
 | `undo_move` | Reverse a previous `move_message` by its `operation_id`, with the same destination checks applied in reverse |
 | `list_move_operations` | List recent move operations, most recent first |
@@ -279,4 +280,4 @@ Use `list_move_operations` to see recent moves and their status, or `get_move_op
 
 ## v1 scope
 
-Deliberately out of scope: sending mail, permanently deleting mail/emptying trash, calendar invitations or attendees, deleting events or reminders. Reminders reflect iCloud's legacy CalDAV/VTODO data model, not everything the current Reminders app supports — this is an Apple platform limitation.
+Deliberately out of scope: sending mail (drafts can be saved, but only you can send them), permanently deleting mail/emptying trash, calendar invitations or attendees, deleting events or reminders. Reminders reflect iCloud's legacy CalDAV/VTODO data model, not everything the current Reminders app supports — this is an Apple platform limitation.

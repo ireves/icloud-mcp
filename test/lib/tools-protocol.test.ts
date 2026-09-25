@@ -15,6 +15,7 @@ const mockImap = vi.hoisted(() => ({
   reconcileFlagged: vi.fn(),
   listMoveOperations: vi.fn(),
   getMoveOperation: vi.fn(),
+  saveDraft: vi.fn(),
 }));
 
 vi.mock('../../lib/imap.js', () => mockImap);
@@ -127,6 +128,30 @@ describe('tool results pass the server\'s own validation', () => {
     });
 
     expect(result.structuredContent).toEqual({ last_seen_uid: 33536 });
+  });
+
+  it('returns structured content for save_draft', async () => {
+    mockImap.saveDraft.mockResolvedValue({ folder: 'Drafts', uid: 12 });
+    const client = await connectedClient();
+
+    const result = await client.callTool({
+      name: 'save_draft',
+      arguments: { to: ['someone@example.com'], subject: 'Hello', body: 'Hi there' },
+    });
+
+    expect(result.structuredContent).toEqual({ ok: true, folder: 'Drafts', uid: 12 });
+  });
+
+  it('refuses a reply given only half of the original message', async () => {
+    const client = await connectedClient();
+
+    const result = await client.callTool({
+      name: 'save_draft',
+      arguments: { to: ['someone@example.com'], subject: 'Re: Hello', body: 'Hi', reply_to_uid: 5 },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(mockImap.saveDraft).not.toHaveBeenCalled();
   });
 
   it('still reports a refusal as a plain error, with no structured content', async () => {
