@@ -8,6 +8,9 @@ import {
   listMessages,
   listMoveOperations,
   markMessage,
+  MAX_DRAFT_ATTACHMENT_BYTES,
+  MAX_DRAFT_ATTACHMENTS,
+  MAX_DRAFT_RECIPIENTS,
   markScanned,
   moveMessage,
   reconcileFlagged,
@@ -263,16 +266,39 @@ export function registerMailTools(server: McpServer): void {
     {
       title: 'Save Email Draft',
       description:
-        'Writes a plain-text email and saves it in the Drafts folder for the operator to review and send themselves. ' +
-        'This never sends mail: there is no tool for sending, and the draft stays in Drafts until a person sends it from Mail. ' +
+        'Writes an email and saves it in the Drafts folder for the operator to review and send themselves. ' +
+        'This cannot send mail: the server only stores messages in folders and has no way to send one, so the draft stays in Drafts until a person sends it from Mail. ' +
+        `Give a plain-text body, a formatted html body, or both; with html alone a plain-text copy is made from it. ` +
+        `At most ${MAX_DRAFT_RECIPIENTS} addresses each in to, cc and bcc. ` +
+        `Attachments are passed as base64, at most ${MAX_DRAFT_ATTACHMENTS} of them and ${MAX_DRAFT_ATTACHMENT_BYTES / 1024 / 1024}MB in total. ` +
         'To reply to a message, pass its folder and UID as reply_to_folder and reply_to_uid so Mail shows the draft in the same conversation; ' +
         'the recipients and subject still have to be given in full (use get_message to see who sent the original).',
       inputSchema: {
-        to: z.array(z.email()).min(1).max(50).describe('Recipient addresses'),
-        cc: z.array(z.email()).max(50).optional().describe('Cc addresses'),
-        bcc: z.array(z.email()).max(50).optional().describe('Bcc addresses'),
+        to: z.array(z.email()).min(1).max(MAX_DRAFT_RECIPIENTS).describe('Recipient addresses'),
+        cc: z.array(z.email()).max(MAX_DRAFT_RECIPIENTS).optional().describe('Cc addresses'),
+        bcc: z.array(z.email()).max(MAX_DRAFT_RECIPIENTS).optional().describe('Bcc addresses'),
         subject: z.string().max(900).describe('Subject line'),
-        body: z.string().max(100_000).describe('Plain-text body'),
+        body: z.string().max(100_000).optional().describe('Plain-text body'),
+        html: z
+          .string()
+          .max(500_000)
+          .optional()
+          .describe('Formatted body as HTML (headings, bold, lists, links, tables). Inline styles only; no scripts'),
+        attachments: z
+          .array(
+            z.object({
+              filename: z.string().min(1).max(255).describe('File name shown in the email, e.g. "invoice.pdf"'),
+              content_base64: z.string().describe("The file's contents, base64-encoded"),
+              content_type: z
+                .string()
+                .max(255)
+                .optional()
+                .describe('Media type, e.g. "application/pdf"; worked out from the file name when absent'),
+            }),
+          )
+          .max(MAX_DRAFT_ATTACHMENTS)
+          .optional()
+          .describe('Files to attach'),
         reply_to_folder: z.string().optional().describe('Folder of the message being replied to'),
         reply_to_uid: z.number().int().positive().optional().describe('UID of the message being replied to'),
       },
@@ -283,12 +309,21 @@ export function registerMailTools(server: McpServer): void {
         if ((args.reply_to_folder === undefined) !== (args.reply_to_uid === undefined)) {
           return toErrorResult(new Error('reply_to_folder and reply_to_uid must be given together.'));
         }
+        if (args.body === undefined && args.html === undefined) {
+          return toErrorResult(new Error('Give a body, an html body, or both.'));
+        }
         const result = await saveDraft({
           to: args.to,
           cc: args.cc,
           bcc: args.bcc,
           subject: args.subject,
           body: args.body,
+          html: args.html,
+          attachments: args.attachments?.map((attachment) => ({
+            filename: attachment.filename,
+            contentBase64: attachment.content_base64,
+            contentType: attachment.content_type,
+          })),
           replyTo:
             args.reply_to_folder !== undefined && args.reply_to_uid !== undefined
               ? { folder: args.reply_to_folder, uid: args.reply_to_uid }

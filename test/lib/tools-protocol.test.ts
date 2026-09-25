@@ -16,6 +16,9 @@ const mockImap = vi.hoisted(() => ({
   listMoveOperations: vi.fn(),
   getMoveOperation: vi.fn(),
   saveDraft: vi.fn(),
+  MAX_DRAFT_RECIPIENTS: 4,
+  MAX_DRAFT_ATTACHMENTS: 10,
+  MAX_DRAFT_ATTACHMENT_BYTES: 3 * 1024 * 1024,
 }));
 
 vi.mock('../../lib/imap.js', () => mockImap);
@@ -52,7 +55,7 @@ const summary = {
 };
 
 beforeEach(() => {
-  for (const fn of Object.values(mockImap)) fn.mockReset();
+  for (const fn of Object.values(mockImap)) if (typeof fn === 'function') fn.mockReset();
 });
 
 describe('tools/list', () => {
@@ -152,6 +155,56 @@ describe('tool results pass the server\'s own validation', () => {
 
     expect(result.isError).toBe(true);
     expect(mockImap.saveDraft).not.toHaveBeenCalled();
+  });
+
+  it('refuses a fifth address in To before anything is saved', async () => {
+    const client = await connectedClient();
+
+    const result = await client.callTool({
+      name: 'save_draft',
+      arguments: {
+        to: ['a@example.com', 'b@example.com', 'c@example.com', 'd@example.com', 'e@example.com'],
+        subject: 'Hello',
+        body: 'Hi',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(mockImap.saveDraft).not.toHaveBeenCalled();
+  });
+
+  it('refuses a draft with no body of either kind', async () => {
+    const client = await connectedClient();
+
+    const result = await client.callTool({
+      name: 'save_draft',
+      arguments: { to: ['someone@example.com'], subject: 'Hello' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(mockImap.saveDraft).not.toHaveBeenCalled();
+  });
+
+  it('passes html and attachments through to the library', async () => {
+    mockImap.saveDraft.mockResolvedValue({ folder: 'Drafts', uid: 13 });
+    const client = await connectedClient();
+
+    await client.callTool({
+      name: 'save_draft',
+      arguments: {
+        to: ['someone@example.com'],
+        subject: 'Hello',
+        html: '<p><b>Hi</b></p>',
+        attachments: [{ filename: 'a.txt', content_base64: 'aGk=', content_type: 'text/plain' }],
+      },
+    });
+
+    expect(mockImap.saveDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        html: '<p><b>Hi</b></p>',
+        attachments: [{ filename: 'a.txt', contentBase64: 'aGk=', contentType: 'text/plain' }],
+      }),
+    );
   });
 
   it('still reports a refusal as a plain error, with no structured content', async () => {

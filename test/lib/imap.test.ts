@@ -670,6 +670,94 @@ describe('saveDraft', () => {
     expect(result.folder).toBe('INBOX.Drafts');
   });
 
+  it('saves a formatted draft with a plain-text copy made from it', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' }]);
+    mockClient.append.mockResolvedValue({ destination: 'Drafts' });
+
+    await imap.saveDraft({ to: ['someone@example.com'], subject: 'Hi', html: '<p>Hello <b>there</b></p>' });
+
+    const text = mockClient.append.mock.calls[0][1].toString();
+    expect(text).toContain('Content-Type: multipart/alternative');
+    expect(text).toContain('Content-Type: text/html');
+    expect(text).toContain('<b>there</b>');
+    expect(text).toMatch(/Content-Type: text\/plain[\s\S]*Hello there/);
+  });
+
+  it('attaches files from their base64 contents', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' }]);
+    mockClient.append.mockResolvedValue({ destination: 'Drafts' });
+
+    await imap.saveDraft({
+      to: ['someone@example.com'],
+      subject: 'Hi',
+      body: 'See attached',
+      attachments: [{ filename: 'notes.txt', contentBase64: Buffer.from('hello file').toString('base64') }],
+    });
+
+    const text = mockClient.append.mock.calls[0][1].toString();
+    expect(text).toContain('Content-Type: multipart/mixed');
+    expect(text).toMatch(/filename=notes\.txt/);
+    expect(text).toContain(Buffer.from('hello file').toString('base64'));
+  });
+
+  it('refuses attachments over the size limit without connecting', async () => {
+    const imap = await freshImap();
+    const big = Buffer.alloc(imap.MAX_DRAFT_ATTACHMENT_BYTES + 1).toString('base64');
+
+    await expect(
+      imap.saveDraft({
+        to: ['someone@example.com'],
+        subject: 'Hi',
+        body: 'x',
+        attachments: [{ filename: 'big.bin', contentBase64: big }],
+      }),
+    ).rejects.toThrow(/limit/);
+    expect(mockClient.connect).not.toHaveBeenCalled();
+  });
+
+  it('refuses an attachment that is not base64', async () => {
+    const imap = await freshImap();
+
+    await expect(
+      imap.saveDraft({
+        to: ['someone@example.com'],
+        subject: 'Hi',
+        body: 'x',
+        attachments: [{ filename: 'a.txt', contentBase64: 'not base64!' }],
+      }),
+    ).rejects.toThrow(/not valid base64/);
+    expect(mockClient.connect).not.toHaveBeenCalled();
+  });
+
+  it('refuses more than four addresses in a field without connecting', async () => {
+    const imap = await freshImap();
+
+    await expect(
+      imap.saveDraft({
+        to: ['a@example.com'],
+        cc: ['b@example.com', 'c@example.com', 'd@example.com', 'e@example.com', 'f@example.com'],
+        subject: 'Hi',
+        body: 'x',
+      }),
+    ).rejects.toThrow(/at most 4 addresses in Cc/);
+    expect(mockClient.connect).not.toHaveBeenCalled();
+  });
+
+  it('never reads a file or web address named in an attachment', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' }]);
+    mockClient.append.mockResolvedValue({ destination: 'Drafts' });
+    const sneaky = { filename: 'a.txt', contentBase64: 'aGk=', path: '/etc/passwd', href: 'http://example.com' };
+
+    await imap.saveDraft({ to: ['someone@example.com'], subject: 'Hi', body: 'x', attachments: [sneaky] });
+
+    const text = mockClient.append.mock.calls[0][1].toString();
+    expect(text).toContain('aGk=');
+    expect(text).not.toContain('root:');
+  });
+
   it('refuses when there is no Drafts folder', async () => {
     const imap = await freshImap();
     mockClient.list.mockResolvedValue([{ path: 'INBOX', name: 'INBOX' }]);
