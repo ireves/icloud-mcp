@@ -1,6 +1,7 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { convert } from 'html-to-text';
+import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import type { MailboxInfo, MessageDetail, MessageSummary } from './types.js';
 import {
   acquireUndoLock,
@@ -942,6 +943,179 @@ export async function flagMessage(params: FlagMessageParams): Promise<void> {
     } finally {
       lock.release();
     }
+  } finally {
+    await client.logout();
+  }
+}
+
+/** Most addresses allowed in each of To, Cc and Bcc. */
+export const MAX_DRAFT_RECIPIENTS = 4;
+/** Most attachments on one draft. */
+export const MAX_DRAFT_ATTACHMENTS = 10;
+/**
+ * Total size of a draft's attachments. Vercel refuses a request over 4.5MB,
+ * and attachments arrive base64-encoded, which adds a third to their size.
+ */
+export const MAX_DRAFT_ATTACHMENT_BYTES = 3 * 1024 * 1024;
+
+export interface DraftAttachment {
+  filename: string;
+  /** The file's contents, base64-encoded. */
+  contentBase64: string;
+  contentType?: string;
+}
+
+export interface SaveDraftParams {
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  /** Plain-text body. Required unless html is given. */
+  body?: string;
+  /** Formatted body. A plain-text copy is made from it when body is absent. */
+  html?: string;
+  attachments?: DraftAttachment[];
+  /** The message this draft replies to, so Mail threads it with the original. */
+  replyTo?: { folder: string; uid: number };
+}
+
+export interface SaveDraftResult {
+  folder: string;
+  uid?: number;
+}
+
+/**
+ * The Drafts folder, found by its SPECIAL-USE marker, or by name when the
+ * server does not report one. Drafts are only ever written here, so this is
+ * also what keeps the tool from filing mail anywhere else.
+ */
+export function findDraftsFolder(mailboxes: MailboxListEntry[]): MailboxListEntry | null {
+  return (
+    mailboxes.find((m) => m.specialUse === '\\Drafts') ??
+    mailboxes.find((m) => m.specialUse === undefined && m.name === 'Drafts') ??
+    null
+  );
+}
+
+/** The Message-ID and References of the message being replied to. */
+async function fetchReplyHeaders(
+  client: ImapFlow,
+  folder: string,
+  uid: number,
+): Promise<{ inReplyTo?: string; references?: string[] }> {
+  const lock = await client.getMailboxLock(folder);
+  try {
+    const meta = await client.fetchOne(String(uid), { envelope: true, headers: ['references'] }, { uid: true });
+    if (!meta) {
+      throw new Error(`Message uid ${uid} not found in folder ${folder}`);
+    }
+    const messageId = meta.envelope?.messageId;
+    if (!messageId) return {};
+    const referencesHeader = meta.headers ? meta.headers.toString('utf8').replace(/^references:/i, '') : '';
+    const references = referencesHeader.match(/<[^<>\s]+>/g) ?? [];
+    return { inReplyTo: messageId, references: [...references, messageId] };
+  } finally {
+    lock.release();
+  }
+}
+
+function assertRecipientCount(field: string, addresses: string[] | undefined): void {
+  if (addresses && addresses.length > MAX_DRAFT_RECIPIENTS) {
+    throw new Error(`A draft can have at most ${MAX_DRAFT_RECIPIENTS} addresses in ${field}.`);
+  }
+}
+
+/**
+ * Decodes each attachment and checks the limits. Only the name, type and
+ * decoded bytes are handed on: the mail builder can also read a file from
+ * disk or fetch a web address for an attachment, and passing nothing else
+ * keeps either from ever happening.
+ */
+function decodeAttachments(
+  attachments: DraftAttachment[] | undefined,
+): { filename: string; content: Buffer; contentType?: string }[] {
+  if (!attachments) return [];
+  if (attachments.length > MAX_DRAFT_ATTACHMENTS) {
+    throw new Error(`A draft can have at most ${MAX_DRAFT_ATTACHMENTS} attachments.`);
+  }
+  let total = 0;
+  return attachments.map((attachment) => {
+    const encoded = attachment.contentBase64.replace(/\s/g, '');
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(encoded) || encoded.length % 4 !== 0) {
+      throw new Error(`Attachment "${attachment.filename}" is not valid base64.`);
+    }
+    const content = Buffer.from(encoded, 'base64');
+    total += content.length;
+    if (total > MAX_DRAFT_ATTACHMENT_BYTES) {
+      throw new Error(
+        `Attachments add up to more than the ${MAX_DRAFT_ATTACHMENT_BYTES / 1024 / 1024}MB limit for one draft.`,
+      );
+    }
+    return { filename: attachment.filename, content, contentType: attachment.contentType };
+  });
+}
+
+/**
+ * Builds the complete message. This only produces bytes: MailComposer has no
+ * way to deliver anything, and nothing in this project creates a transport
+ * that could (test/lib/no-sending.test.ts checks that stays true).
+ */
+export async function composeDraft(from: string, params: SaveDraftParams, reply: {
+  inReplyTo?: string;
+  references?: string[];
+}): Promise<Buffer> {
+  assertRecipientCount('To', params.to);
+  assertRecipientCount('Cc', params.cc);
+  assertRecipientCount('Bcc', params.bcc);
+  if (params.to.length === 0) {
+    throw new Error('A draft needs at least one address in To.');
+  }
+  if (params.body === undefined && params.html === undefined) {
+    throw new Error('A draft needs a body, an html body, or both.');
+  }
+  const text = params.body ?? htmlToText(params.html as string);
+
+  const mail = new MailComposer({
+    from,
+    to: params.to,
+    cc: params.cc,
+    bcc: params.bcc,
+    subject: params.subject,
+    text,
+    html: params.html,
+    attachments: decodeAttachments(params.attachments),
+    inReplyTo: reply.inReplyTo,
+    references: reply.references,
+  }).compile();
+  // A draft keeps its Bcc line so it is still there when the operator opens it.
+  mail.keepBcc = true;
+  return mail.build();
+}
+
+/**
+ * Saves a new message in the Drafts folder, marked as a draft. Nothing is
+ * sent: this server only speaks IMAP, which stores mail and has no command
+ * for sending it. The draft waits in Mail until the operator sends it.
+ */
+export async function saveDraft(params: SaveDraftParams): Promise<SaveDraftResult> {
+  const from = requireEnv('ICLOUD_EMAIL');
+  // Build once before connecting, so a draft that breaks a limit is refused
+  // without touching the account.
+  await composeDraft(from, params, {});
+
+  const client = getClient();
+  await client.connect();
+  try {
+    const drafts = findDraftsFolder(await client.list());
+    if (!drafts) {
+      throw new Error('No Drafts folder was found in this mail account, so the draft could not be saved.');
+    }
+
+    const reply = params.replyTo ? await fetchReplyHeaders(client, params.replyTo.folder, params.replyTo.uid) : {};
+    const source = await composeDraft(from, params, reply);
+
+    const result = await client.append(drafts.path, source, ['\\Draft', '\\Seen']);
+    return { folder: drafts.path, uid: result ? result.uid : undefined };
   } finally {
     await client.logout();
   }

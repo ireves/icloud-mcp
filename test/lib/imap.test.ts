@@ -9,6 +9,7 @@ const mockClient = vi.hoisted(() => ({
   fetchOne: vi.fn(),
   search: vi.fn(),
   fetch: vi.fn(),
+  append: vi.fn(),
   mailbox: { uidValidity: 1000n } as { uidValidity: bigint; uidNext?: number } | false,
 }));
 
@@ -596,5 +597,174 @@ describe('mark_scanned — checks marks against the folder\'s current numbering'
 
     await expect(imap.markScanned({ folder: 'INBOX', throughUid: 120 })).rejects.toThrow(/\(none\)/);
     expect(mockScanProgress.advanceLastSeenUid).not.toHaveBeenCalled();
+  });
+});
+
+describe('saveDraft', () => {
+  it('saves the message in Drafts, marked as a draft, and sends nothing', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([
+      { path: 'INBOX', name: 'INBOX' },
+      { path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' },
+    ]);
+    mockClient.append.mockResolvedValue({ destination: 'Drafts', uid: 42 });
+
+    const result = await imap.saveDraft({
+      to: ['someone@example.com'],
+      bcc: ['hidden@example.com'],
+      subject: 'Hello',
+      body: 'Hi there',
+    });
+
+    expect(result).toEqual({ folder: 'Drafts', uid: 42 });
+    const [path, source, flags] = mockClient.append.mock.calls[0];
+    expect(path).toBe('Drafts');
+    expect(flags).toEqual(['\\Draft', '\\Seen']);
+    const text = source.toString();
+    expect(text).toContain('From: test@icloud.com');
+    expect(text).toContain('To: someone@example.com');
+    expect(text).toContain('Bcc: hidden@example.com');
+    expect(text).toContain('Subject: Hello');
+    expect(text).toContain('Hi there');
+  });
+
+  it('cannot be made to add a header through the subject', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' }]);
+    mockClient.append.mockResolvedValue({ destination: 'Drafts' });
+
+    await imap.saveDraft({ to: ['someone@example.com'], subject: 'Hi\r\nBcc: evil@example.com', body: 'x' });
+
+    const text = mockClient.append.mock.calls[0][1].toString();
+    expect(text).not.toMatch(/^Bcc:/m);
+  });
+
+  it('threads a reply with the original message', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' }]);
+    mockClient.fetchOne.mockResolvedValue({
+      envelope: { messageId: '<orig@example.com>' },
+      headers: Buffer.from('References: <first@example.com>\r\n'),
+    });
+    mockClient.append.mockResolvedValue({ destination: 'Drafts', uid: 7 });
+
+    await imap.saveDraft({
+      to: ['someone@example.com'],
+      subject: 'Re: Hello',
+      body: 'Thanks',
+      replyTo: { folder: 'INBOX', uid: 3 },
+    });
+
+    const text = mockClient.append.mock.calls[0][1].toString();
+    expect(text).toContain('In-Reply-To: <orig@example.com>');
+    expect(text).toContain('References: <first@example.com> <orig@example.com>');
+  });
+
+  it('finds Drafts by name when the server does not mark it', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'INBOX.Drafts', name: 'Drafts' }]);
+    mockClient.append.mockResolvedValue({ destination: 'INBOX.Drafts' });
+
+    const result = await imap.saveDraft({ to: ['someone@example.com'], subject: 'Hi', body: 'x' });
+
+    expect(result.folder).toBe('INBOX.Drafts');
+  });
+
+  it('saves a formatted draft with a plain-text copy made from it', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' }]);
+    mockClient.append.mockResolvedValue({ destination: 'Drafts' });
+
+    await imap.saveDraft({ to: ['someone@example.com'], subject: 'Hi', html: '<p>Hello <b>there</b></p>' });
+
+    const text = mockClient.append.mock.calls[0][1].toString();
+    expect(text).toContain('Content-Type: multipart/alternative');
+    expect(text).toContain('Content-Type: text/html');
+    expect(text).toContain('<b>there</b>');
+    expect(text).toMatch(/Content-Type: text\/plain[\s\S]*Hello there/);
+  });
+
+  it('attaches files from their base64 contents', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' }]);
+    mockClient.append.mockResolvedValue({ destination: 'Drafts' });
+
+    await imap.saveDraft({
+      to: ['someone@example.com'],
+      subject: 'Hi',
+      body: 'See attached',
+      attachments: [{ filename: 'notes.txt', contentBase64: Buffer.from('hello file').toString('base64') }],
+    });
+
+    const text = mockClient.append.mock.calls[0][1].toString();
+    expect(text).toContain('Content-Type: multipart/mixed');
+    expect(text).toMatch(/filename=notes\.txt/);
+    expect(text).toContain(Buffer.from('hello file').toString('base64'));
+  });
+
+  it('refuses attachments over the size limit without connecting', async () => {
+    const imap = await freshImap();
+    const big = Buffer.alloc(imap.MAX_DRAFT_ATTACHMENT_BYTES + 1).toString('base64');
+
+    await expect(
+      imap.saveDraft({
+        to: ['someone@example.com'],
+        subject: 'Hi',
+        body: 'x',
+        attachments: [{ filename: 'big.bin', contentBase64: big }],
+      }),
+    ).rejects.toThrow(/limit/);
+    expect(mockClient.connect).not.toHaveBeenCalled();
+  });
+
+  it('refuses an attachment that is not base64', async () => {
+    const imap = await freshImap();
+
+    await expect(
+      imap.saveDraft({
+        to: ['someone@example.com'],
+        subject: 'Hi',
+        body: 'x',
+        attachments: [{ filename: 'a.txt', contentBase64: 'not base64!' }],
+      }),
+    ).rejects.toThrow(/not valid base64/);
+    expect(mockClient.connect).not.toHaveBeenCalled();
+  });
+
+  it('refuses more than four addresses in a field without connecting', async () => {
+    const imap = await freshImap();
+
+    await expect(
+      imap.saveDraft({
+        to: ['a@example.com'],
+        cc: ['b@example.com', 'c@example.com', 'd@example.com', 'e@example.com', 'f@example.com'],
+        subject: 'Hi',
+        body: 'x',
+      }),
+    ).rejects.toThrow(/at most 4 addresses in Cc/);
+    expect(mockClient.connect).not.toHaveBeenCalled();
+  });
+
+  it('never reads a file or web address named in an attachment', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' }]);
+    mockClient.append.mockResolvedValue({ destination: 'Drafts' });
+    const sneaky = { filename: 'a.txt', contentBase64: 'aGk=', path: '/etc/passwd', href: 'http://example.com' };
+
+    await imap.saveDraft({ to: ['someone@example.com'], subject: 'Hi', body: 'x', attachments: [sneaky] });
+
+    const text = mockClient.append.mock.calls[0][1].toString();
+    expect(text).toContain('aGk=');
+    expect(text).not.toContain('root:');
+  });
+
+  it('refuses when there is no Drafts folder', async () => {
+    const imap = await freshImap();
+    mockClient.list.mockResolvedValue([{ path: 'INBOX', name: 'INBOX' }]);
+
+    await expect(
+      imap.saveDraft({ to: ['someone@example.com'], subject: 'Hi', body: 'x' }),
+    ).rejects.toThrow(/No Drafts folder/);
+    expect(mockClient.append).not.toHaveBeenCalled();
   });
 });

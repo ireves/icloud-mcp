@@ -89,6 +89,13 @@ export const moveMessageOutput = {
   note: z.string().optional(),
 };
 
+export const saveDraftOutput = {
+  ok: z.literal(true),
+  folder: z.string(),
+  // Absent when the server does not report the new message's UID.
+  uid: z.number().int().optional(),
+};
+
 export const undoMoveOutput = { ok: z.literal(true), operation_id: z.string() };
 
 export const listMoveOperationsOutput = {

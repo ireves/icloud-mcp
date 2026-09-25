@@ -37,7 +37,7 @@ describe('every tool declares an output schema', () => {
   });
 
   it('registers the full set of tools', () => {
-    expect(Object.keys(registeredTools())).toHaveLength(22);
+    expect(Object.keys(registeredTools())).toHaveLength(23);
   });
 });
 
