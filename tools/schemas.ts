@@ -25,6 +25,7 @@ export const messageSummarySchema = z.object({
   from: z.string(),
   date: z.string(),
   unread: z.boolean(),
+  flagged: z.boolean(),
 });
 
 export const messageDetailSchema = messageSummarySchema.extend({
@@ -58,11 +59,13 @@ export const listFoldersOutput = { folders: z.array(mailboxInfoSchema) };
 export const listExceptionsOutput = {
   exceptions: z.array(
     z.object({
-      sender: z.string(),
-      action: z.enum(['keep_in_inbox', 'move_to_folder']),
+      sender: z.string().optional(),
+      title: z.string().optional(),
+      action: z.enum(['keep_in_inbox', 'move_to_folder']).optional(),
       destination_folder: z.string().optional(),
       notes: z.string().optional(),
       timing: z.string().optional(),
+      read_rule: z.boolean(),
     }),
   ),
 };

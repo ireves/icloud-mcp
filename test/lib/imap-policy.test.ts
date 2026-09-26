@@ -305,6 +305,49 @@ describe('moveMessage — the operator exceptions list', () => {
     expect(client().messageMove).not.toHaveBeenCalled();
   });
 
+  it('enforces a rule stored with the live column types (email sender, select destination)', async () => {
+    const imap = await freshImap();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            results: [
+              {
+                id: 'row-live',
+                properties: {
+                  Title: { title: [{ plain_text: 'The bank' }] },
+                  Sender: { email: 'Accounts@Example.com' },
+                  Action: { select: { name: 'Move to Folder' } },
+                  'Destination Folder': { select: { name: 'Receipts' } },
+                  Timing: { select: { name: 'Immediately' } },
+                  'Read Rule': { checkbox: true },
+                },
+              },
+              {
+                id: 'row-themed',
+                properties: {
+                  Title: { title: [{ plain_text: 'Anything else' }] },
+                  Sender: { email: null },
+                  Action: { select: { name: 'Keep in Inbox' } },
+                },
+              },
+            ],
+            has_more: false,
+            next_cursor: null,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+
+    await expect(imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Archive' })).rejects.toThrow(
+      /belongs in "Receipts", not "Archive"/,
+    );
+    await imap.moveMessage({ folder: 'INBOX', uid: 1, targetFolder: 'Receipts' });
+    expect(client().messageMove).toHaveBeenCalledWith('1', 'Receipts', { uid: true });
+  });
+
   it('allows the move the rule names', async () => {
     const imap = await freshImap();
     stubNotionRows([{ sender: 'accounts@example.com', action: 'Move to Folder', destination: 'Receipts' }]);
