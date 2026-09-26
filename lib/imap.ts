@@ -353,6 +353,17 @@ async function extractBody(source: Buffer | undefined): Promise<string> {
 }
 
 /**
+ * An envelope date as an ISO string, or null when there is none worth using.
+ * A message with a malformed Date header can come back with a date that is
+ * not a Date at all, or an Invalid Date, and calling toISOString on either
+ * throws — which would fail a whole listing because of one bad message.
+ */
+function isoDate(value: unknown): string | null {
+  const date = value instanceof Date ? value : typeof value === 'string' ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? date.toISOString() : null;
+}
+
+/**
  * Builds a list entry from a fetched message. The subject is written by
  * whoever sent the message, so it carries an inline untrusted tag — a subject
  * line is a perfectly good place to hide an instruction, and these entries
@@ -364,8 +375,9 @@ function toSummary(message: { uid: number; envelope?: FetchedEnvelope; flags?: S
     uid: message.uid,
     subject: subject ? tagUntrustedInline('EMAIL SUBJECT', subject) : '(no subject)',
     from: message.envelope?.from?.[0]?.address ?? 'unknown',
-    date: message.envelope?.date ? message.envelope.date.toISOString() : '',
+    date: isoDate(message.envelope?.date) ?? '',
     unread: !message.flags?.has('\\Seen'),
+    flagged: message.flags?.has('\\Flagged') ?? false,
   };
 }
 
@@ -585,7 +597,7 @@ async function executeLoggedMove(
     const envelope = meta ? meta.envelope : undefined;
     const identity: MoveIdentity = {
       messageId: envelope?.messageId ?? null,
-      date: envelope?.date ? envelope.date.toISOString() : null,
+      date: isoDate(envelope?.date),
       subject: envelope?.subject ?? null,
     };
     const sourceUidValidity = client.mailbox !== false ? client.mailbox.uidValidity : 0n;
@@ -762,7 +774,7 @@ export async function undoMove(operationId: string): Promise<{ newOperationId: s
       }
       const liveIdentity = {
         messageId: destMeta.envelope?.messageId ?? null,
-        date: destMeta.envelope?.date ? destMeta.envelope.date.toISOString() : null,
+        date: isoDate(destMeta.envelope?.date),
         subject: destMeta.envelope?.subject ?? null,
       };
       if (!identityMatches(liveIdentity, effectiveRecord.identity)) {

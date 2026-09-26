@@ -25,8 +25,9 @@ vi.mock('../../lib/imap.js', () => mockImap);
 vi.mock('../../lib/exceptions.js', () => ({
   isExceptionsConfigured: () => true,
   getExceptions: async () => [
-    { sender: 'a@b.com', action: 'keep_in_inbox' as const },
-    { sender: 'c@d.com', action: 'move_to_folder' as const, destinationFolder: 'Receipts', notes: 'n', timing: 't' },
+    { sender: 'a@b.com', action: 'keep_in_inbox' as const, readRule: false },
+    { sender: 'c@d.com', action: 'move_to_folder' as const, destinationFolder: 'Receipts', notes: 'n', timing: 't', readRule: true },
+    { title: 'Themed rule', action: 'move_to_folder' as const, destinationFolder: 'Alerts', readRule: false },
   ],
 }));
 
@@ -52,6 +53,7 @@ const summary = {
   from: 'someone@example.com',
   date: '2026-09-18T00:00:00.000Z',
   unread: true,
+  flagged: false,
 };
 
 beforeEach(() => {
@@ -106,7 +108,7 @@ describe('tool results pass the server\'s own validation', () => {
     const result = await client.callTool({ name: 'list_exceptions', arguments: {} });
 
     expect(result.isError).toBeFalsy();
-    expect((result.structuredContent as { exceptions: unknown[] }).exceptions).toHaveLength(2);
+    expect((result.structuredContent as { exceptions: unknown[] }).exceptions).toHaveLength(3);
   });
 
   it('returns structured content for a move', async () => {

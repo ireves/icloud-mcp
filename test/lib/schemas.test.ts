@@ -72,6 +72,7 @@ describe('declared schemas accept what the tools actually return', () => {
     from: 'someone@example.com',
     date: '2026-09-18T00:00:00.000Z',
     unread: true,
+    flagged: false,
   };
   const detail: MessageDetail = { ...summary, to: 'me@icloud.com', body: 'Body text.' };
   const operation: MoveOperationRecord = {
@@ -111,14 +112,17 @@ describe('declared schemas accept what the tools actually return', () => {
       schemas.listExceptionsOutput,
       {
         exceptions: [
-          { sender: 'a@b.com', action: 'keep_in_inbox' },
+          { sender: 'a@b.com', action: 'keep_in_inbox', read_rule: false },
           {
             sender: 'c@d.com',
             action: 'move_to_folder',
             destination_folder: 'Receipts',
             notes: 'wrapped text',
-            timing: 'wrapped text',
+            timing: 'After 3 days',
+            read_rule: true,
           },
+          { title: 'Themed rule', action: 'move_to_folder', destination_folder: 'Alerts', read_rule: false },
+          { sender: 'e@f.com', read_rule: false },
         ],
       },
     ],

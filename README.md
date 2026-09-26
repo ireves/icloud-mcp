@@ -146,12 +146,12 @@ Both read from a local `.env` file and print what they find. Run them separately
 | Tool | Description |
 |---|---|
 | `list_folders` | List all mail folders |
-| `list_messages` | List message headers in a folder (subject, sender, date, unread, UID); subjects are marked untrusted |
+| `list_messages` | List message headers in a folder (subject, sender, date, unread, flagged, UID); subjects are marked untrusted |
 | `mark_scanned` | Record how far a folder has been processed; only accepts a UID the server has listed |
 | `reconcile_flagged` | Return messages unflagged since the previous call, so they get sorted |
 | `get_message` | Get full headers and body for one message (HTML converted to plain text, hidden text removed, body marked untrusted) |
 | `mark_message` | Mark a message read/unread |
-| `list_exceptions` | List the operator's standing sorting rules, read from Notion |
+| `list_exceptions` | List the operator's standing sorting rules, read from Notion: sender rules, themed rules, timing and the read rule |
 | `move_message` | Move a message to another folder (Trash/Junk, the destination allowlist and the sorting exceptions are all enforced by the server); returns an `operation_id` you can pass to `undo_move` |
 | `save_draft` | Save an email in the Drafts folder for you to review and send yourself. Plain text and/or HTML formatting, up to 4 addresses each in To, Cc and Bcc, and up to 10 attachments totalling 3MB; can be threaded as a reply to an existing message. Nothing is ever sent |
 | `flag_message` | Flag/unflag a message |
@@ -197,9 +197,21 @@ Leaving the variable unset allows any folder that is not Trash or Junk. That is 
 
 Some senders have a standing rule: this one always stays in the Inbox, that one always goes to Receipts. Those rules live in a Notion database called **Email Sorting Exceptions**, and the server reads them itself rather than relying on an agent to look them up first. A scheduled sorting task therefore needs no Notion connector of its own.
 
-Each row has a `Sender` (an address, a domain like `example.com`, or a display name), an `Action` of either `Keep in Inbox` or `Move to Folder`, a `Destination Folder` used only by the second action, and free-text `Notes` and `Timing` columns for your own reference.
+Each row has these columns:
 
-The rules are enforced in the server, on every `move_message` and on any `undo_move` that would take a message back out of the Inbox. A move that contradicts a rule is refused, whatever the agent was asked to do. Rows are cached for five minutes per running instance, so an edit in Notion takes up to five minutes to take effect. If the list cannot be read at all, moves are refused rather than allowed through unchecked.
+| Column | Type | Meaning |
+|---|---|---|
+| `Title` | Title | The row's name. On a themed rule it describes the kind of mail the rule covers. |
+| `Sender` | Email (or text) | An address, a domain like `example.com`, or a display name. Leave it empty for a themed rule. |
+| `Action` | Select | `Keep in Inbox` or `Move to Folder`. |
+| `Destination Folder` | Select (or text) | Used only by `Move to Folder`. |
+| `Timing` | Select (or text) | When a move is due, such as `Immediately` or `After 3 days`. |
+| `Read Rule` | Checkbox | When ticked, wait until the message has been read before applying the timing. |
+| `Notes` | Text | Free text for your own reference. |
+
+A row with a `Sender` is a **sender rule**. A row with no `Sender` is a **themed rule**: `list_exceptions` passes it to the agent, which decides which messages it fits, but the server cannot match it to a message and so does not enforce it. A row with no usable `Action` is still listed, so the agent can report it as incomplete, but nothing is enforced for it. Timing and the read rule are for the agent to apply; the server enforces only the action and destination.
+
+Sender rules are enforced in the server, on every `move_message` and on any `undo_move` that would take a message back out of the Inbox. A move that contradicts a rule is refused, whatever the agent was asked to do. Rows are cached for five minutes per running instance, so an edit in Notion takes up to five minutes to take effect. If the list cannot be read at all, moves are refused rather than allowed through unchecked.
 
 ### Giving the server read-only access
 
@@ -213,11 +225,11 @@ You need to be a workspace owner to create a connection.
 
 If you keep the rules in a different database, put its data source id in `NOTION_EXCEPTIONS_DATA_SOURCE_ID`; otherwise leave it unset.
 
-`Notes` and `Timing` are written by a human, but the server still labels them as untrusted when handing them to an agent, for the same reason it labels message bodies: text that reaches a model as content should never read as an instruction.
+`Notes` is written by a human, but the server still labels it as untrusted when handing it to an agent, for the same reason it labels message bodies: text that reaches a model as content should never read as an instruction. `Timing` is passed through unlabelled, since the agent is meant to act on it.
 
 ## Untrusted content
 
-Everything an outsider wrote arrives labelled. Message bodies, calendar descriptions and reminder notes come back wrapped in a marked block saying the content is data to be read or sorted, never instructions; subjects and the exceptions list's free-text columns get a shorter inline tag. Anything in the content that imitates one of those markers is replaced, so a message cannot close the block early and carry on as though it were trusted.
+Everything an outsider wrote arrives labelled. Message bodies, calendar descriptions and reminder notes come back wrapped in a marked block saying the content is data to be read or sorted, never instructions; subjects and the exceptions list's `Notes` column get a shorter inline tag. Anything in the content that imitates one of those markers is replaced, so a message cannot close the block early and carry on as though it were trusted.
 
 This makes an agent less likely to act on an instruction buried in a message. It does not make it impossible, which is why the refusals above (Trash and Junk, the destination allowlist, the sorting exceptions, the scan marker) are enforced in the server, where no amount of persuasion reaches them.
 

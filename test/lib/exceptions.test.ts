@@ -10,26 +10,33 @@ import {
 const DATA_SOURCE_ID = 'f2ebf247-9368-498f-86a9-3341260874e1';
 const QUERY_URL = `https://api.notion.com/v1/data_sources/${DATA_SOURCE_ID}/query`;
 
-/** Builds a Notion page in the shape the data-source query returns. */
+/**
+ * Builds a Notion page in the shape the data-source query returns, with the
+ * column types the live database uses: Sender is an email column, Destination
+ * Folder and Timing are selects, and Read Rule is a checkbox.
+ */
 function notionRow(fields: {
   id?: string;
+  title?: string;
   sender?: string;
   action?: string;
   destination?: string;
   notes?: string;
   timing?: string;
+  readRule?: boolean;
 }) {
-  const richText = (value?: string) =>
-    value === undefined ? { rich_text: [] } : { rich_text: [{ plain_text: value }] };
+  const select = (value?: string) => ({ select: value === undefined ? null : { name: value } });
 
   return {
     id: fields.id ?? 'page-1',
     properties: {
-      Sender: fields.sender === undefined ? { title: [] } : { title: [{ plain_text: fields.sender }] },
-      Action: { select: fields.action === undefined ? null : { name: fields.action } },
-      'Destination Folder': richText(fields.destination),
-      Notes: richText(fields.notes),
-      Timing: richText(fields.timing),
+      Title: { title: fields.title === undefined ? [] : [{ plain_text: fields.title }] },
+      Sender: { email: fields.sender ?? null },
+      Action: select(fields.action),
+      'Destination Folder': select(fields.destination),
+      Notes: { rich_text: fields.notes === undefined ? [] : [{ plain_text: fields.notes }] },
+      Timing: select(fields.timing),
+      'Read Rule': { checkbox: fields.readRule ?? false },
     },
   };
 }
@@ -145,14 +152,15 @@ describe('getExceptions — pagination', () => {
 });
 
 describe('getExceptions — row mapping', () => {
-  it('maps a keep-in-inbox row, lower-casing and trimming the sender', async () => {
+  it('maps a sender rule, lower-casing and trimming the sender', async () => {
     stubNotion({
       results: [
         notionRow({
+          title: 'The bank',
           sender: '  Accounts@Example.COM ',
           action: 'Keep in Inbox',
           notes: 'Bills live here',
-          timing: 'only during tax season',
+          timing: 'Never (always keep)',
         }),
       ],
       has_more: false,
@@ -162,32 +170,75 @@ describe('getExceptions — row mapping', () => {
 
     expect(exception).toEqual({
       sender: 'accounts@example.com',
+      title: 'The bank',
       action: 'keep_in_inbox',
       destinationFolder: undefined,
       notes: 'Bills live here',
-      timing: 'only during tax season',
+      timing: 'Never (always keep)',
+      readRule: false,
     });
   });
 
-  it('maps a move-to-folder row with its destination', async () => {
+  it('reads the destination and timing from select columns, and the read rule from its checkbox', async () => {
     stubNotion({
-      results: [notionRow({ sender: 'news@example.com', action: 'Move to Folder', destination: 'Newsletters' })],
+      results: [
+        notionRow({
+          sender: 'news@example.com',
+          action: 'Move to Folder',
+          destination: 'Newsletter',
+          timing: 'Immediately',
+          readRule: true,
+        }),
+      ],
       has_more: false,
     });
 
     const [exception] = await getExceptions();
 
-    expect(exception).toMatchObject({ action: 'move_to_folder', destinationFolder: 'Newsletters' });
+    expect(exception).toMatchObject({
+      action: 'move_to_folder',
+      destinationFolder: 'Newsletter',
+      timing: 'Immediately',
+      readRule: true,
+    });
   });
 
-  it('joins multi-run rich text back into one value', async () => {
+  it('keeps a themed rule, which has a title but no sender', async () => {
+    stubNotion({
+      results: [
+        notionRow({
+          title: 'Order-status or shipping notifications',
+          action: 'Move to Folder',
+          destination: 'Alerts',
+          timing: 'After 3 days',
+        }),
+      ],
+      has_more: false,
+    });
+
+    const [exception] = await getExceptions();
+
+    expect(exception).toEqual({
+      sender: undefined,
+      title: 'Order-status or shipping notifications',
+      action: 'move_to_folder',
+      destinationFolder: 'Alerts',
+      notes: undefined,
+      timing: 'After 3 days',
+      readRule: false,
+    });
+  });
+
+  it('still reads columns stored as plain text', async () => {
     stubNotion({
       results: [
         {
-          id: 'split',
+          id: 'text-columns',
           properties: {
             Sender: { title: [{ plain_text: 'accounts@' }, { plain_text: 'example.com' }] },
-            Action: { select: { name: 'Keep in Inbox' } },
+            Action: { select: { name: 'Move to Folder' } },
+            'Destination Folder': { rich_text: [{ plain_text: 'Receipts' }] },
+            Timing: { rich_text: [{ plain_text: 'After 3 days' }] },
           },
         },
       ],
@@ -195,12 +246,17 @@ describe('getExceptions — row mapping', () => {
     });
 
     const [exception] = await getExceptions();
-    expect(exception.sender).toBe('accounts@example.com');
+    expect(exception).toMatchObject({
+      sender: 'accounts@example.com',
+      destinationFolder: 'Receipts',
+      timing: 'After 3 days',
+      readRule: false,
+    });
   });
 });
 
-describe('getExceptions — skipped rows', () => {
-  it('skips a row with an empty Sender and warns', async () => {
+describe('getExceptions — skipped and incomplete rows', () => {
+  it('skips a row with neither a Sender nor a Title, and warns', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     stubNotion({
       results: [
@@ -213,23 +269,29 @@ describe('getExceptions — skipped rows', () => {
     const exceptions = await getExceptions();
 
     expect(exceptions).toHaveLength(1);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Sender column is empty'));
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Sender and Title columns are empty'));
   });
 
-  it('skips a row whose Action is not one of the two known values, and warns', async () => {
+  it('keeps a row whose Action is not one of the two known values, without an action, and warns', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     stubNotion({
       results: [notionRow({ id: 'odd', sender: 'x@example.com', action: 'Delete Immediately' })],
       has_more: false,
     });
 
-    expect(await getExceptions()).toEqual([]);
+    const [exception] = await getExceptions();
+    expect(exception).toMatchObject({ sender: 'x@example.com', action: undefined });
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('Delete Immediately'));
   });
 
-  it('skips a row with no Action at all', async () => {
-    stubNotion({ results: [notionRow({ sender: 'x@example.com' })], has_more: false });
-    expect(await getExceptions()).toEqual([]);
+  it('keeps a row with no Action at all, so it can be reported as incomplete', async () => {
+    stubNotion({
+      results: [notionRow({ title: 'Home-related admin', sender: 'notify@buildinglink.com', timing: 'After 6 days' })],
+      has_more: false,
+    });
+
+    const [exception] = await getExceptions();
+    expect(exception).toMatchObject({ sender: 'notify@buildinglink.com', action: undefined, timing: 'After 6 days' });
   });
 
   it('keeps a move-to-folder row with no destination, but warns that nothing will be enforced', async () => {
@@ -290,13 +352,14 @@ describe('getExceptions — caching', () => {
 });
 
 describe('matchException', () => {
-  const byAddress: SortingException = { sender: 'accounts@example.com', action: 'keep_in_inbox' };
+  const byAddress: SortingException = { sender: 'accounts@example.com', action: 'keep_in_inbox', readRule: false };
   const byDomain: SortingException = {
     sender: 'example.com',
     action: 'move_to_folder',
     destinationFolder: 'Work',
+    readRule: false,
   };
-  const byName: SortingException = { sender: 'the bank', action: 'keep_in_inbox' };
+  const byName: SortingException = { sender: 'the bank', action: 'keep_in_inbox', readRule: false };
   const all = [byDomain, byName, byAddress];
 
   it('matches an exact address', () => {
@@ -331,6 +394,21 @@ describe('matchException', () => {
   it('returns null for a missing address and no name', () => {
     expect(matchException(all, null)).toBeNull();
     expect(matchException(all, undefined, null)).toBeNull();
+  });
+
+  it('ignores themed rules, which have no sender to match', () => {
+    const themed: SortingException = {
+      title: 'Receipts or invoices from any other online purchase',
+      action: 'move_to_folder',
+      destinationFolder: 'Receipts',
+      readRule: false,
+    };
+    expect(matchException([themed], 'shop@example.com', 'Receipts')).toBeNull();
+  });
+
+  it('ignores a sender row with no action, since it has nothing to enforce', () => {
+    const incomplete: SortingException = { sender: 'notify@buildinglink.com', readRule: false };
+    expect(matchException([incomplete, byDomain], 'notify@buildinglink.com')).toBeNull();
   });
 
   it('returns null against an empty list', () => {

@@ -461,6 +461,40 @@ describe('mark_scanned — only marks what has been listed', () => {
     expect(mockScanProgress.recordMaxListedUid).toHaveBeenCalledWith('INBOX', 12, '1000');
   });
 
+  it('reports whether each listed message is flagged', async () => {
+    const imap = await freshImap();
+    mockClient.search.mockResolvedValue([10, 11]);
+    mockClient.fetch.mockImplementation(async function* () {
+      yield { uid: 10, envelope: { subject: 'a' }, flags: new Set<string>(['\\Seen', '\\Flagged']) };
+      yield { uid: 11, envelope: { subject: 'b' }, flags: new Set<string>() };
+    });
+
+    const { messages } = await imap.listMessages({ folder: 'INBOX' });
+
+    expect(messages.map((m) => [m.uid, m.flagged, m.unread])).toEqual([
+      [11, false, true],
+      [10, true, false],
+    ]);
+  });
+
+  it('lists a message with a malformed date instead of failing the whole listing', async () => {
+    const imap = await freshImap();
+    mockClient.search.mockResolvedValue([10, 11, 12]);
+    mockClient.fetch.mockImplementation(async function* () {
+      yield { uid: 10, envelope: { subject: 'a', date: 'not a date' }, flags: new Set<string>() };
+      yield { uid: 11, envelope: { subject: 'b', date: new Date('invalid') }, flags: new Set<string>() };
+      yield { uid: 12, envelope: { subject: 'c', date: 'Tue, 1 Sep 2026 10:00:00 +0000' }, flags: new Set<string>() };
+    });
+
+    const { messages } = await imap.listMessages({ folder: 'INBOX' });
+
+    expect(messages.map((m) => [m.uid, m.date])).toEqual([
+      [12, '2026-09-01T10:00:00.000Z'],
+      [11, ''],
+      [10, ''],
+    ]);
+  });
+
   it('records nothing when a folder returns no messages', async () => {
     const imap = await freshImap();
     mockClient.search.mockResolvedValue([]);

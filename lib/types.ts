@@ -11,6 +11,7 @@ export interface MessageSummary {
   from: string;
   date: string;
   unread: boolean;
+  flagged: boolean;
 }
 
 export interface MessageDetail extends MessageSummary {
