@@ -83,12 +83,47 @@ export function registerCalendarTools(server: McpServer): void {
     {
       title: 'Create Event',
       description:
-        'Creates a personal calendar event. Never adds attendees or sends invitations — this is for personal scheduling only.',
+        'Creates a personal calendar event, optionally all-day, repeating, and with alerts. Never adds attendees or sends invitations — this is for personal scheduling only.',
       inputSchema: {
         calendar_id: z.string().describe('Calendar identifier to create the event in'),
         title: z.string().describe('Event title'),
-        start_time: z.string().describe('ISO 8601 start time with an explicit "Z" or timezone offset'),
-        end_time: z.string().describe('ISO 8601 end time with an explicit "Z" or timezone offset'),
+        all_day: z.boolean().optional().describe('True for an all-day event. start_time and end_time are then dates (YYYY-MM-DD)'),
+        start_time: z
+          .string()
+          .describe('ISO 8601 start time with an explicit "Z" or timezone offset. For an all-day event, the first day as YYYY-MM-DD'),
+        end_time: z
+          .string()
+          .optional()
+          .describe(
+            'ISO 8601 end time with an explicit "Z" or timezone offset; required unless all-day. For an all-day event, the last day (inclusive) as YYYY-MM-DD, or leave out for a single day',
+          ),
+        time_zone: z
+          .string()
+          .optional()
+          .describe(
+            'IANA time zone the event belongs to, e.g. "Europe/London". Required for a repeating event that is not all-day, so it keeps the same local time across clock changes. Not used for all-day events',
+          ),
+        repeat: z
+          .object({
+            frequency: z.enum(['daily', 'weekly', 'monthly', 'yearly']).describe('How often the event repeats'),
+            interval: z.number().int().min(1).max(999).optional().describe('Repeat every N days/weeks/months/years; defaults to 1'),
+            days_of_week: z
+              .array(z.enum(['MO', 'TU', 'WE', 'TH', 'FR', 'SA', 'SU']))
+              .min(1)
+              .optional()
+              .describe('Weekly only: the days it falls on. Defaults to the weekday of start_time'),
+            until: z.string().optional().describe('Last date (YYYY-MM-DD, inclusive) it may occur on. Leave out, with count, to repeat forever'),
+            count: z.number().int().min(1).max(1000).optional().describe('Total number of occurrences. Cannot be combined with until'),
+          })
+          .optional()
+          .describe('Makes the event repeat'),
+        alerts: z
+          .array(z.number().int().min(0).max(40320))
+          .max(5)
+          .optional()
+          .describe(
+            'Alerts, each in minutes before the start (0 = at the start, max 4 weeks). For an all-day event, counted back from midnight at the start of the day',
+          ),
         location: z.string().optional().describe('Event location'),
         notes: z.string().optional().describe('Event notes/description'),
       },
@@ -99,8 +134,18 @@ export function registerCalendarTools(server: McpServer): void {
         const result = await createEvent({
           calendarId: args.calendar_id,
           title: args.title,
+          allDay: args.all_day,
           startTime: args.start_time,
           endTime: args.end_time,
+          timeZone: args.time_zone,
+          repeat: args.repeat && {
+            frequency: args.repeat.frequency,
+            interval: args.repeat.interval,
+            daysOfWeek: args.repeat.days_of_week,
+            until: args.repeat.until,
+            count: args.repeat.count,
+          },
+          alerts: args.alerts,
           location: args.location,
           notes: args.notes,
         });

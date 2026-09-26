@@ -10,6 +10,7 @@ import type {
   ReminderListInfo,
   ReminderSummary,
 } from './types.js';
+import { assertValidTimeZone, buildVtimezone, wallClockAt, wallClockToUtc } from './timezone.js';
 import { stripInvisible, wrapUntrusted } from './untrusted.js';
 
 function requireEnv(name: string): string {
@@ -365,21 +366,126 @@ function newUid(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}@icloud-mcp`;
 }
 
+export type RepeatFrequency = 'daily' | 'weekly' | 'monthly' | 'yearly';
+export type Weekday = 'MO' | 'TU' | 'WE' | 'TH' | 'FR' | 'SA' | 'SU';
+
+export interface RepeatRule {
+  frequency: RepeatFrequency;
+  interval?: number;
+  daysOfWeek?: Weekday[];
+  // Last date (YYYY-MM-DD, inclusive) an occurrence may fall on.
+  until?: string;
+  count?: number;
+}
+
 export interface CreateEventParams {
   calendarId: string;
   title: string;
+  // Timed: ISO 8601 date-times. All-day: YYYY-MM-DD dates, with endTime the
+  // last day of the event (inclusive) and optional for a single day.
   startTime: string;
-  endTime: string;
+  endTime?: string;
+  allDay?: boolean;
+  timeZone?: string;
+  repeat?: RepeatRule;
+  // Minutes before the start at which to show an alert.
+  alerts?: number[];
   location?: string;
   notes?: string;
+}
+
+interface DateOnly {
+  year: number;
+  month: number;
+  day: number;
+}
+
+export function parseDateOnly(value: string, fieldName: string): DateOnly {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    throw new Error(`${fieldName} must be a date in the form YYYY-MM-DD, got: "${value}"`);
+  }
+  const [year, month, day] = match.slice(1).map(Number);
+  const check = new Date(Date.UTC(year, month - 1, day));
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) {
+    throw new Error(`${fieldName} is not a valid calendar date: "${value}"`);
+  }
+  return { year, month, day };
+}
+
+function dateOnlyMs(d: DateOnly): number {
+  return Date.UTC(d.year, d.month - 1, d.day);
+}
+
+function dateOnlyToIcal(ms: number): ICAL.Time {
+  const d = new Date(ms);
+  return ICAL.Time.fromData({ year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate(), isDate: true });
+}
+
+function icalUtc(ms: number): string {
+  return new Date(ms).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
+}
+
+const MAX_ALERTS = 5;
+const MAX_ALERT_MINUTES = 4 * 7 * 24 * 60;
+
+function buildRrule(repeat: RepeatRule, allDay: boolean, startMs: number, timeZone: string | undefined): ICAL.Recur {
+  const parts = [`FREQ=${repeat.frequency.toUpperCase()}`];
+  if (repeat.interval !== undefined) {
+    if (!Number.isInteger(repeat.interval) || repeat.interval < 1) {
+      throw new Error('repeat.interval must be a whole number of 1 or more');
+    }
+    if (repeat.interval > 1) parts.push(`INTERVAL=${repeat.interval}`);
+  }
+  if (repeat.daysOfWeek !== undefined) {
+    if (repeat.frequency !== 'weekly') {
+      throw new Error('repeat.days_of_week can only be used with a weekly frequency');
+    }
+    if (repeat.daysOfWeek.length === 0) throw new Error('repeat.days_of_week must name at least one day');
+    parts.push(`BYDAY=${[...new Set(repeat.daysOfWeek)].join(',')}`);
+  }
+  if (repeat.until !== undefined && repeat.count !== undefined) {
+    throw new Error('Give repeat.until or repeat.count, not both');
+  }
+  if (repeat.count !== undefined) {
+    if (!Number.isInteger(repeat.count) || repeat.count < 1) {
+      throw new Error('repeat.count must be a whole number of 1 or more');
+    }
+    parts.push(`COUNT=${repeat.count}`);
+  }
+  if (repeat.until !== undefined) {
+    const until = parseDateOnly(repeat.until, 'repeat.until');
+    if (allDay) {
+      if (dateOnlyMs(until) < startMs) throw new Error('repeat.until must not be before the start date');
+      parts.push(`UNTIL=${repeat.until.replace(/-/g, '')}`);
+    } else {
+      // RFC 5545 3.3.10: with a zoned DTSTART, UNTIL is a UTC date-time.
+      // The end of the named day, on the event's own clock.
+      const untilMs = wallClockToUtc(timeZone as string, { ...until, hour: 23, minute: 59, second: 59 });
+      if (untilMs < startMs) throw new Error('repeat.until must not be before the start date');
+      parts.push(`UNTIL=${icalUtc(untilMs)}`);
+    }
+  }
+  return ICAL.Recur.fromString(parts.join(';'));
 }
 
 export async function createEvent(params: CreateEventParams): Promise<{ id: string }> {
   const client = await getClient();
   const calendar = await findCalendar(params.calendarId);
-  const startTime = parseRequiredDateTime(params.startTime, 'start_time');
-  const endTime = parseRequiredDateTime(params.endTime, 'end_time');
-  assertStartBeforeEnd(startTime, endTime);
+  const allDay = params.allDay === true;
+  if (params.timeZone !== undefined) {
+    if (allDay) throw new Error('time_zone does not apply to all-day events; leave it out');
+    assertValidTimeZone(params.timeZone);
+  }
+
+  const alerts = [...new Set(params.alerts ?? [])];
+  if (alerts.length > MAX_ALERTS) throw new Error(`At most ${MAX_ALERTS} alerts can be set on one event`);
+  for (const minutes of alerts) {
+    if (!Number.isInteger(minutes) || minutes < 0 || minutes > MAX_ALERT_MINUTES) {
+      throw new Error(`Each alert must be a whole number of minutes from 0 to ${MAX_ALERT_MINUTES} (4 weeks), got: ${minutes}`);
+    }
+  }
+
   const uid = newUid();
   const filename = `${uid}.ics`;
 
@@ -389,11 +495,54 @@ export async function createEvent(params: CreateEventParams): Promise<{ id: stri
   const vevent = new ICAL.Component('vevent');
   vevent.updatePropertyWithValue('uid', uid);
   vevent.updatePropertyWithValue('summary', params.title);
-  vevent.updatePropertyWithValue('dtstart', ICAL.Time.fromJSDate(startTime, true));
-  vevent.updatePropertyWithValue('dtend', ICAL.Time.fromJSDate(endTime, true));
+
+  let startMs: number;
+  if (allDay) {
+    const startDate = parseDateOnly(params.startTime, 'start_time');
+    const lastDate = params.endTime !== undefined ? parseDateOnly(params.endTime, 'end_time') : startDate;
+    startMs = dateOnlyMs(startDate);
+    const lastMs = dateOnlyMs(lastDate);
+    if (lastMs < startMs) throw new Error('end_time must not be before start_time');
+    vevent.updatePropertyWithValue('dtstart', dateOnlyToIcal(startMs));
+    // DTEND of an all-day event is exclusive: the day after the last day.
+    vevent.updatePropertyWithValue('dtend', dateOnlyToIcal(lastMs + 24 * 60 * 60 * 1000));
+  } else {
+    if (params.endTime === undefined) throw new Error('end_time is required for an event that is not all-day');
+    const startTime = parseRequiredDateTime(params.startTime, 'start_time');
+    const endTime = parseRequiredDateTime(params.endTime, 'end_time');
+    assertStartBeforeEnd(startTime, endTime);
+    startMs = startTime.getTime();
+    if (params.repeat && params.timeZone === undefined) {
+      throw new Error(
+        'time_zone is required for a repeating event with a start time (e.g. "Europe/London"), so it keeps the same local time across clock changes',
+      );
+    }
+    if (params.timeZone !== undefined) {
+      const zone = params.timeZone;
+      const setZoned = (name: 'dtstart' | 'dtend', ms: number) => {
+        vevent.updatePropertyWithValue(name, ICAL.Time.fromData({ ...wallClockAt(zone, ms), isDate: false }));
+        vevent.getFirstProperty(name)?.setParameter('tzid', zone);
+      };
+      setZoned('dtstart', startTime.getTime());
+      setZoned('dtend', endTime.getTime());
+      vcalendar.addSubcomponent(buildVtimezone(zone, wallClockAt(zone, startMs).year));
+    } else {
+      vevent.updatePropertyWithValue('dtstart', ICAL.Time.fromJSDate(startTime, true));
+      vevent.updatePropertyWithValue('dtend', ICAL.Time.fromJSDate(endTime, true));
+    }
+  }
+
   vevent.updatePropertyWithValue('dtstamp', ICAL.Time.now());
+  if (params.repeat) vevent.updatePropertyWithValue('rrule', buildRrule(params.repeat, allDay, startMs, params.timeZone));
   if (params.location) vevent.updatePropertyWithValue('location', params.location);
   if (params.notes) vevent.updatePropertyWithValue('description', params.notes);
+  for (const minutes of alerts.sort((a, b) => a - b)) {
+    const valarm = new ICAL.Component('valarm');
+    valarm.updatePropertyWithValue('action', 'DISPLAY');
+    valarm.updatePropertyWithValue('description', params.title);
+    valarm.updatePropertyWithValue('trigger', ICAL.Duration.fromSeconds(-minutes * 60));
+    vevent.addSubcomponent(valarm);
+  }
   vcalendar.addSubcomponent(vevent);
 
   const response = await client.createCalendarObject({
