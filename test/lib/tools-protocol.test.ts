@@ -11,6 +11,8 @@ const mockImap = vi.hoisted(() => ({
   markMessage: vi.fn(),
   flagMessage: vi.fn(),
   moveMessage: vi.fn(),
+  moveMessages: vi.fn(),
+  MAX_BATCH_MOVE: 100,
   undoMove: vi.fn(),
   markScanned: vi.fn(),
   reconcileFlagged: vi.fn(),

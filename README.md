@@ -155,6 +155,7 @@ Both read from a local `.env` file and print what they find. Run them separately
 | `mark_message` | Mark a message read/unread |
 | `list_exceptions` | List the operator's standing sorting rules, read from Notion: sender rules, themed rules, timing and the read rule |
 | `move_message` | Move a message to another folder (Trash/Junk, the destination allowlist and the sorting exceptions are all enforced by the server); returns an `operation_id` you can pass to `undo_move` |
+| `move_messages` | Move up to 100 messages from one folder to the same destination in one call. The same server checks apply to every message, one refusal does not stop the rest, and each moved message gets its own `operation_id` for `undo_move` |
 | `save_draft` | Save an email in the Drafts folder for you to review and send yourself. Plain text and/or HTML formatting, up to 4 addresses each in To, Cc and Bcc, and up to 10 attachments totalling 3MB; can be threaded as a reply to an existing message. Nothing is ever sent |
 | `flag_message` | Flag/unflag a message |
 | `undo_move` | Reverse a previous `move_message` by its `operation_id`, with the same destination checks applied in reverse |

@@ -1059,6 +1059,72 @@ export async function moveMessage(params: MoveMessageParams): Promise<MoveMessag
   }
 }
 
+/** The most messages move_messages takes in one call. */
+export const MAX_BATCH_MOVE = 100;
+
+export interface MoveMessagesParams {
+  folder: string;
+  uids: number[];
+  targetFolder: string;
+}
+
+export interface BatchMoveOutcome {
+  uid: number;
+  /** Present when the message was moved; pass it to undo_move to reverse this one message. */
+  operationId?: string;
+  /** Present when this message was not moved, with the reason. */
+  error?: string;
+}
+
+/**
+ * Moves several messages from one folder to another over one connection.
+ * The folder policy is checked once for the pair of folders; each message
+ * then gets the same sender-rule check, logging and undo record as a single
+ * move_message. One message being refused does not stop the others.
+ */
+export async function moveMessages(params: MoveMessagesParams): Promise<BatchMoveOutcome[]> {
+  const uids = [...new Set(params.uids)];
+  if (uids.length === 0) throw new Error('move_messages needs at least one UID.');
+  if (uids.length > MAX_BATCH_MOVE) {
+    throw new Error(`move_messages takes at most ${MAX_BATCH_MOVE} UIDs per call; ${uids.length} were given.`);
+  }
+
+  const client = getClient();
+  await client.connect();
+  try {
+    const mailboxes = await client.list();
+    assertMoveAllowed(mailboxes, params.folder, params.targetFolder);
+    if (params.folder === params.targetFolder) {
+      return uids.map((uid) => ({ uid, error: 'Source and destination are the same folder; nothing was moved.' }));
+    }
+
+    const outcomes: BatchMoveOutcome[] = [];
+    for (const [index, uid] of uids.entries()) {
+      if (client.usable === false) {
+        // The connection is gone, so nothing further can be moved or checked.
+        for (const rest of uids.slice(index)) {
+          outcomes.push({ uid: rest, error: 'Not attempted: the connection to iCloud was lost.' });
+        }
+        break;
+      }
+      try {
+        await assertExceptionsAllowMove(client, { sourcePath: params.folder, uid, targetPath: params.targetFolder });
+        const { operationId } = await executeLoggedMove(client, {
+          sourcePath: params.folder,
+          uid,
+          destPath: params.targetFolder,
+        });
+        outcomes.push({ uid, operationId });
+      } catch (error) {
+        outcomes.push({ uid, error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return outcomes;
+  } finally {
+    await client.logout();
+  }
+}
+
 function identityMatches(
   a: { messageId: string | null; date: string | null; subject: string | null },
   b: { messageId: string | null; date: string | null; subject: string | null },

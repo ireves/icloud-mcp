@@ -472,3 +472,128 @@ describe('moveMessage — the operator exceptions list', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });
+
+describe('moveMessages — several messages in one call', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    delete process.env.NOTION_EXCEPTIONS_TOKEN;
+  });
+
+  /** Senders by UID, so each message can be matched against a different rule. */
+  function sendersByUid(senders: Record<number, string>) {
+    client().fetchOne.mockImplementation(async (uid: string) => ({
+      envelope: {
+        messageId: `<${uid}@example.com>`,
+        date: new Date('2026-09-01T00:00:00.000Z'),
+        subject: `Message ${uid}`,
+        from: [{ address: senders[Number(uid)], name: null }],
+      },
+    }));
+    client().messageMove.mockImplementation(async (uid: string) => ({
+      uidValidity: 2000n,
+      uidMap: new Map([[Number(uid), Number(uid) + 100]]),
+    }));
+  }
+
+  it('moves each message, logging each one separately so each can be undone', async () => {
+    const imap = await freshImap();
+    stubNotionRows([]);
+    sendersByUid({ 1: 'a@shop.example', 2: 'b@shop.example' });
+    mockMoveLog.createPendingOperation.mockResolvedValueOnce('op-1').mockResolvedValueOnce('op-2');
+
+    const outcomes = await imap.moveMessages({ folder: 'INBOX', uids: [1, 2], targetFolder: 'Archive' });
+
+    expect(outcomes).toEqual([
+      { uid: 1, operationId: 'op-1' },
+      { uid: 2, operationId: 'op-2' },
+    ]);
+    expect(client().messageMove).toHaveBeenCalledTimes(2);
+    expect(mockMoveLog.markConfirmed).toHaveBeenCalledTimes(2);
+    expect(client().connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('checks each sender against the rules, refusing one without stopping the rest', async () => {
+    const imap = await freshImap();
+    stubNotionRows([{ sender: 'bank@example.com', action: 'Keep in Inbox' }]);
+    sendersByUid({ 1: 'shop@example.org', 2: 'bank@example.com', 3: 'news@example.org' });
+
+    const outcomes = await imap.moveMessages({ folder: 'INBOX', uids: [1, 2, 3], targetFolder: 'Archive' });
+
+    expect(outcomes.map((o) => [o.uid, Boolean(o.operationId)])).toEqual([
+      [1, true],
+      [2, false],
+      [3, true],
+    ]);
+    expect(outcomes[1].error).toMatch(/stays in the Inbox/);
+    expect(client().messageMove).not.toHaveBeenCalledWith('2', 'Archive', { uid: true });
+  });
+
+  it('refuses the whole batch when the folders themselves are not allowed', async () => {
+    const imap = await freshImap();
+    client().list.mockResolvedValue([
+      { path: 'INBOX', name: 'INBOX' },
+      { path: 'Junk', name: 'Junk', specialUse: '\\Junk' },
+    ]);
+
+    await expect(imap.moveMessages({ folder: 'INBOX', uids: [1, 2], targetFolder: 'Junk' })).rejects.toThrow(
+      /blocked by default/,
+    );
+    expect(client().messageMove).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed move for that message and carries on', async () => {
+    const imap = await freshImap();
+    stubNotionRows([]);
+    sendersByUid({ 1: 'a@x.example', 2: 'b@x.example' });
+    client().messageMove.mockRejectedValueOnce(new Error('NO message gone'));
+
+    const outcomes = await imap.moveMessages({ folder: 'INBOX', uids: [1, 2], targetFolder: 'Archive' });
+
+    expect(outcomes[0]).toEqual({ uid: 1, error: 'NO message gone' });
+    expect(outcomes[1].operationId).toBeDefined();
+  });
+
+  it('stops and marks the rest as not attempted when the connection drops', async () => {
+    const imap = await freshImap();
+    stubNotionRows([]);
+    sendersByUid({ 1: 'a@x.example', 2: 'b@x.example', 3: 'c@x.example' });
+    const c = client() as MockImapClient & { usable?: boolean };
+    client().messageMove.mockImplementationOnce(async () => {
+      c.usable = false;
+      throw Object.assign(new Error('socket closed'), { code: 'ECONNRESET' });
+    });
+
+    const outcomes = await imap.moveMessages({ folder: 'INBOX', uids: [1, 2, 3], targetFolder: 'Archive' });
+    delete c.usable;
+
+    expect(outcomes).toEqual([
+      { uid: 1, error: 'socket closed' },
+      { uid: 2, error: 'Not attempted: the connection to iCloud was lost.' },
+      { uid: 3, error: 'Not attempted: the connection to iCloud was lost.' },
+    ]);
+    expect(mockMoveLog.markUncertain).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses more than the per-call limit before connecting', async () => {
+    const imap = await freshImap();
+    const uids = Array.from({ length: imap.MAX_BATCH_MOVE + 1 }, (_, i) => i + 1);
+
+    await expect(imap.moveMessages({ folder: 'INBOX', uids, targetFolder: 'Archive' })).rejects.toThrow(/at most 100/);
+    expect(client().connect).not.toHaveBeenCalled();
+  });
+
+  it('moves a repeated UID only once', async () => {
+    const imap = await freshImap();
+    stubNotionRows([]);
+    sendersByUid({ 5: 'a@x.example' });
+
+    const outcomes = await imap.moveMessages({ folder: 'INBOX', uids: [5, 5], targetFolder: 'Archive' });
+
+    expect(outcomes).toHaveLength(1);
+    expect(client().messageMove).toHaveBeenCalledTimes(1);
+  });
+});
