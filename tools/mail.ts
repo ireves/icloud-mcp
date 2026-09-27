@@ -115,11 +115,12 @@ export function registerMailTools(server: McpServer): void {
         folder: z.string().describe('Folder path, e.g. "INBOX"'),
         limit: z.number().int().positive().max(200).optional().describe('Max messages to return, default 25'),
         unread_only: z.boolean().optional().describe('Only return unread messages'),
-        since_date: z.string().optional().describe('ISO 8601 date; only messages on or after this date'),
-        before_date: z.string().optional().describe('ISO 8601 date; only messages before this date (the day itself is excluded)'),
+        since_date: z.string().optional().describe('ISO 8601 date; only messages sent on or after this date'),
+        before_date: z.string().optional().describe('ISO 8601 date; only messages sent before this date (the day itself is excluded)'),
         from_address: z.string().optional().describe('Only messages from this sender address'),
         subject: z.string().optional().describe('Only messages whose subject contains this text'),
-        text: z.string().optional().describe('Only messages containing this text anywhere (headers or body)'),
+        text: z.string().optional().describe('Words to find anywhere in the message (headers or body). Each word must appear, in any order; put "double quotes" around words that must appear together as a phrase'),
+        to_address: z.string().optional().describe('Only messages sent to this address (full or partial)'),
         before_uid: z.number().int().positive().optional().describe("Backward pagination cursor from a previous call's next_cursor; returns messages older than this UID"),
         after_uid: z.number().int().positive().optional().describe('Forward pagination cursor; returns messages newer than this UID, oldest-first'),
         since_last_run: z
@@ -142,6 +143,7 @@ export function registerMailTools(server: McpServer): void {
           fromAddress: args.from_address,
           subject: args.subject,
           text: args.text,
+          toAddress: args.to_address,
           beforeUid: args.before_uid,
           afterUid: args.after_uid,
           sinceLastRun: args.since_last_run,
@@ -205,16 +207,23 @@ export function registerMailTools(server: McpServer): void {
       description:
         'Searches every mail folder at once (Inbox, Sent, Archive and all your own folders and sub-folders), skipping Trash and Junk. ' +
         'The search runs on the mail server, so it covers every message however old, not just recent ones. ' +
-        'Returns the newest matches first, each with its folder and UID for get_message. total is how many matched in all; ' +
-        'if it is more than were returned, narrow the search with a date range or more specific text. At least one filter is required.',
+        'Returns matches newest first by the date the email was sent, each with its folder, its UID for get_message, and a short preview of the body (untrusted). ' +
+        'total is how many matched in all. When next_cursor is present, pass it back as cursor, with the same filters, for the next older page. ' +
+        'If the words in text are not found anywhere, the search tries them in subjects, senders and recipients instead, and matched_by says "subject_or_sender". ' +
+        'skipped_folders lists any folder that could not be searched, so its matches are missing. At least one filter is required.',
       inputSchema: {
-        text: z.string().optional().describe('Text to find anywhere in the message (headers or body)'),
+        text: z
+          .string()
+          .optional()
+          .describe('Words to find anywhere in the message (headers or body). Each word must appear, in any order; put "double quotes" around words that must appear together as a phrase'),
         subject: z.string().optional().describe('Only messages whose subject contains this text'),
         from_address: z.string().optional().describe('Only messages from this sender (full or partial address)'),
-        since_date: z.string().optional().describe('ISO 8601 date; only messages on or after this date'),
-        before_date: z.string().optional().describe('ISO 8601 date; only messages before this date (the day itself is excluded)'),
+        to_address: z.string().optional().describe('Only messages sent to this address (full or partial), useful for finding your own sent mail'),
+        since_date: z.string().optional().describe('ISO 8601 date; only messages sent on or after this date'),
+        before_date: z.string().optional().describe('ISO 8601 date; only messages sent before this date (the day itself is excluded)'),
         unread_only: z.boolean().optional().describe('Only return unread messages'),
         limit: z.number().int().positive().max(200).optional().describe('Max messages to return, default 25'),
+        cursor: z.string().optional().describe("next_cursor from a previous search_mail call with the same filters, for the next page"),
       },
       outputSchema: searchMailOutput,
     },
@@ -224,12 +233,21 @@ export function registerMailTools(server: McpServer): void {
           text: args.text,
           subject: args.subject,
           fromAddress: args.from_address,
+          toAddress: args.to_address,
           sinceDate: args.since_date,
           beforeDate: args.before_date,
           unreadOnly: args.unread_only,
           limit: args.limit,
+          cursor: args.cursor,
         });
-        return toResult({ messages: result.messages, total: result.total, searched_folders: result.searchedFolders });
+        return toResult({
+          messages: result.messages,
+          total: result.total,
+          searched_folders: result.searchedFolders,
+          skipped_folders: result.skippedFolders,
+          next_cursor: result.nextCursor,
+          matched_by: result.matchedBy,
+        });
       } catch (error) {
         return toErrorResult(error);
       }

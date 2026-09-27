@@ -77,9 +77,12 @@ export const listMessagesOutput = {
 };
 
 export const searchMailOutput = {
-  messages: z.array(messageSummarySchema.extend({ folder: z.string() })),
+  messages: z.array(messageSummarySchema.extend({ folder: z.string(), preview: z.string().optional() })),
   total: z.number().int(),
   searched_folders: z.array(z.string()),
+  skipped_folders: z.array(z.object({ folder: z.string(), reason: z.string() })),
+  next_cursor: z.string().optional(),
+  matched_by: z.enum(['text', 'subject_or_sender']).optional(),
 };
 
 export const markScannedOutput = { last_seen_uid: z.number().int() };
