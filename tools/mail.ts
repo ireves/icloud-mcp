@@ -15,6 +15,7 @@ import {
   moveMessage,
   reconcileFlagged,
   saveDraft,
+  searchMail,
   undoMove,
 } from '../lib/imap.js';
 import { getExceptions, isExceptionsConfigured } from '../lib/exceptions.js';
@@ -31,6 +32,7 @@ import {
   okOutput,
   reconcileFlaggedOutput,
   saveDraftOutput,
+  searchMailOutput,
   undoMoveOutput,
 } from './schemas.js';
 import { wrapUntrusted } from '../lib/untrusted.js';
@@ -105,6 +107,8 @@ export function registerMailTools(server: McpServer): void {
       title: 'List Mail Messages',
       description:
         'Lists message headers (subject, sender, date, unread status, flagged status, UID) in a folder — not full bodies. Use get_message for a full body. ' +
+        'Works on any folder, including sub-folders (use the path from list_folders). To find a message without knowing its folder, use search_mail instead. ' +
+        'total is how many messages match across all pages. ' +
         'For backfill: page backward through history by passing next_cursor back as before_uid until next_cursor is absent. ' +
         'For a recurring scan: pass since_last_run to skip everything already processed in past runs (oldest-unprocessed-first), then call mark_scanned once you have handled a batch so future runs pick up after it.',
       inputSchema: {
@@ -112,7 +116,10 @@ export function registerMailTools(server: McpServer): void {
         limit: z.number().int().positive().max(200).optional().describe('Max messages to return, default 25'),
         unread_only: z.boolean().optional().describe('Only return unread messages'),
         since_date: z.string().optional().describe('ISO 8601 date; only messages on or after this date'),
+        before_date: z.string().optional().describe('ISO 8601 date; only messages before this date (the day itself is excluded)'),
         from_address: z.string().optional().describe('Only messages from this sender address'),
+        subject: z.string().optional().describe('Only messages whose subject contains this text'),
+        text: z.string().optional().describe('Only messages containing this text anywhere (headers or body)'),
         before_uid: z.number().int().positive().optional().describe("Backward pagination cursor from a previous call's next_cursor; returns messages older than this UID"),
         after_uid: z.number().int().positive().optional().describe('Forward pagination cursor; returns messages newer than this UID, oldest-first'),
         since_last_run: z
@@ -131,12 +138,15 @@ export function registerMailTools(server: McpServer): void {
           limit: args.limit,
           unreadOnly: args.unread_only,
           sinceDate: args.since_date,
+          beforeDate: args.before_date,
           fromAddress: args.from_address,
+          subject: args.subject,
+          text: args.text,
           beforeUid: args.before_uid,
           afterUid: args.after_uid,
           sinceLastRun: args.since_last_run,
         });
-        return toResult({ messages: result.messages, next_cursor: result.nextCursor });
+        return toResult({ messages: result.messages, next_cursor: result.nextCursor, total: result.total });
       } catch (error) {
         return toErrorResult(error);
       }
@@ -182,6 +192,44 @@ export function registerMailTools(server: McpServer): void {
       try {
         const result = await reconcileFlagged(args.folder);
         return toResult({ newly_unflagged: result.newlyUnflagged });
+      } catch (error) {
+        return toErrorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'search_mail',
+    {
+      title: 'Search Mail',
+      description:
+        'Searches every mail folder at once (Inbox, Sent, Archive and all your own folders and sub-folders), skipping Trash and Junk. ' +
+        'The search runs on the mail server, so it covers every message however old, not just recent ones. ' +
+        'Returns the newest matches first, each with its folder and UID for get_message. total is how many matched in all; ' +
+        'if it is more than were returned, narrow the search with a date range or more specific text. At least one filter is required.',
+      inputSchema: {
+        text: z.string().optional().describe('Text to find anywhere in the message (headers or body)'),
+        subject: z.string().optional().describe('Only messages whose subject contains this text'),
+        from_address: z.string().optional().describe('Only messages from this sender (full or partial address)'),
+        since_date: z.string().optional().describe('ISO 8601 date; only messages on or after this date'),
+        before_date: z.string().optional().describe('ISO 8601 date; only messages before this date (the day itself is excluded)'),
+        unread_only: z.boolean().optional().describe('Only return unread messages'),
+        limit: z.number().int().positive().max(200).optional().describe('Max messages to return, default 25'),
+      },
+      outputSchema: searchMailOutput,
+    },
+    async (args) => {
+      try {
+        const result = await searchMail({
+          text: args.text,
+          subject: args.subject,
+          fromAddress: args.from_address,
+          sinceDate: args.since_date,
+          beforeDate: args.before_date,
+          unreadOnly: args.unread_only,
+          limit: args.limit,
+        });
+        return toResult({ messages: result.messages, total: result.total, searched_folders: result.searchedFolders });
       } catch (error) {
         return toErrorResult(error);
       }

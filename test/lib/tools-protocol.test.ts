@@ -6,6 +6,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 const mockImap = vi.hoisted(() => ({
   listFolders: vi.fn(),
   listMessages: vi.fn(),
+  searchMail: vi.fn(),
   getMessage: vi.fn(),
   markMessage: vi.fn(),
   flagMessage: vi.fn(),
@@ -84,13 +85,13 @@ describe('tools/list', () => {
 
 describe('tool results pass the server\'s own validation', () => {
   it('returns structured content for list_messages', async () => {
-    mockImap.listMessages.mockResolvedValue({ messages: [summary], nextCursor: 33600 });
+    mockImap.listMessages.mockResolvedValue({ messages: [summary], nextCursor: 33600, total: 40 });
     const client = await connectedClient();
 
     const result = await client.callTool({ name: 'list_messages', arguments: { folder: 'INBOX' } });
 
     expect(result.isError).toBeFalsy();
-    expect(result.structuredContent).toEqual({ messages: [summary], next_cursor: 33600 });
+    expect(result.structuredContent).toEqual({ messages: [summary], next_cursor: 33600, total: 40 });
   });
 
   it('returns structured content for list_folders, wrapped in a named field', async () => {

@@ -146,7 +146,8 @@ Both read from a local `.env` file and print what they find. Run them separately
 | Tool | Description |
 |---|---|
 | `list_folders` | List all mail folders |
-| `list_messages` | List message headers in a folder (subject, sender, date, unread, flagged, UID); subjects are marked untrusted |
+| `list_messages` | List message headers in a folder or sub-folder (subject, sender, date, unread, flagged, UID), with filters for date range, sender, subject and text, and a total match count; subjects are marked untrusted |
+| `search_mail` | Search every folder except Trash and Junk at once, on the mail server, so old mail is found as easily as new; returns the newest matches with their folder |
 | `mark_scanned` | Record how far a folder has been processed; only accepts a UID the server has listed |
 | `reconcile_flagged` | Return messages unflagged since the previous call, so they get sorted |
 | `get_message` | Get full headers and body for one message (HTML converted to plain text, hidden text removed, body marked untrusted) |

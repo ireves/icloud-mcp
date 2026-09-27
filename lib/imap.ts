@@ -424,7 +424,10 @@ export interface ListMessagesParams {
   limit?: number;
   unreadOnly?: boolean;
   sinceDate?: string;
+  beforeDate?: string;
   fromAddress?: string;
+  subject?: string;
+  text?: string;
   beforeUid?: number;
   afterUid?: number;
   sinceLastRun?: boolean;
@@ -433,6 +436,35 @@ export interface ListMessagesParams {
 export interface ListMessagesResult {
   messages: MessageSummary[];
   nextCursor?: number;
+  /** How many messages in the folder match the filters, across all pages. */
+  total: number;
+}
+
+interface SearchFilters {
+  unreadOnly?: boolean;
+  sinceDate?: string;
+  beforeDate?: string;
+  fromAddress?: string;
+  subject?: string;
+  text?: string;
+}
+
+function parseFilterDate(name: string, value: string): Date {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error(`${name} is not a valid date: "${value}"`);
+  return date;
+}
+
+/** The IMAP search criteria shared by list_messages and search_mail. */
+function buildSearchCriteria(filters: SearchFilters): Record<string, unknown> {
+  const criteria: Record<string, unknown> = {};
+  if (filters.unreadOnly) criteria.seen = false;
+  if (filters.sinceDate) criteria.since = parseFilterDate('since_date', filters.sinceDate);
+  if (filters.beforeDate) criteria.before = parseFilterDate('before_date', filters.beforeDate);
+  if (filters.fromAddress) criteria.from = filters.fromAddress;
+  if (filters.subject) criteria.subject = filters.subject;
+  if (filters.text) criteria.text = filters.text;
+  return criteria;
 }
 
 export async function listMessages(params: ListMessagesParams): Promise<ListMessagesResult> {
@@ -448,10 +480,7 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
         if (lastSeen !== null) afterUid = afterUid !== undefined ? Math.max(afterUid, lastSeen) : lastSeen;
       }
 
-      const searchCriteria: Record<string, unknown> = {};
-      if (params.unreadOnly) searchCriteria.seen = false;
-      if (params.sinceDate) searchCriteria.since = new Date(params.sinceDate);
-      if (params.fromAddress) searchCriteria.from = params.fromAddress;
+      const searchCriteria = buildSearchCriteria(params);
       // Flagged messages are excluded from the since-last-run scan entirely
       // so they never block the high-water mark; reconcileFlagged() is how
       // an unflagged message gets picked back up for sorting later.
@@ -459,7 +488,8 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
       const query = Object.keys(searchCriteria).length > 0 ? searchCriteria : { all: true };
 
       let uids = await client.search(query, { uid: true });
-      if (!uids || uids.length === 0) return { messages: [] };
+      if (!uids || uids.length === 0) return { messages: [], total: 0 };
+      const total = uids.length;
 
       const limit = params.limit ?? 25;
 
@@ -467,7 +497,7 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
         // Forward pagination: oldest-unprocessed-first, so a run that stops
         // partway through still advances the high-water mark sequentially.
         uids = uids.filter((uid) => uid > afterUid!).sort((a, b) => a - b);
-        if (uids.length === 0) return { messages: [] };
+        if (uids.length === 0) return { messages: [], total };
 
         const hasMore = uids.length > limit;
         const limited = uids.slice(0, limit);
@@ -478,13 +508,13 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
         results.sort((a, b) => a.uid - b.uid);
         await recordListed(params.folder, results, uidValidity);
         const nextCursor = hasMore ? results[results.length - 1]?.uid : undefined;
-        return { messages: results, nextCursor };
+        return { messages: results, nextCursor, total };
       }
 
       if (params.beforeUid !== undefined) {
         uids = uids.filter((uid) => uid < params.beforeUid!);
       }
-      if (uids.length === 0) return { messages: [] };
+      if (uids.length === 0) return { messages: [], total };
 
       const hasMore = uids.length > limit;
       const limited = uids.slice(-limit).reverse();
@@ -495,10 +525,75 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
       results.sort((a, b) => b.uid - a.uid);
       await recordListed(params.folder, results, uidValidity);
       const nextCursor = hasMore ? results[results.length - 1]?.uid : undefined;
-      return { messages: results, nextCursor };
+      return { messages: results, nextCursor, total };
     } finally {
       lock.release();
     }
+  } finally {
+    await client.logout();
+  }
+}
+
+export interface SearchMailParams extends SearchFilters {
+  limit?: number;
+}
+
+export interface SearchMailHit extends MessageSummary {
+  folder: string;
+}
+
+export interface SearchMailResult {
+  messages: SearchMailHit[];
+  /** How many messages matched across every searched folder. */
+  total: number;
+  searchedFolders: string[];
+}
+
+/** Folders search_mail skips: Trash and Junk, plus containers that hold no mail. */
+function isSkippedForSearch(mailbox: MailboxListEntry & { flags?: Set<string> }): boolean {
+  if (mailbox.flags?.has('\\Noselect') || mailbox.flags?.has('\\NonExistent')) return true;
+  return isProhibitedDestination(mailbox);
+}
+
+function dateValue(message: MessageSummary): number {
+  const time = Date.parse(message.date);
+  return Number.isNaN(time) ? 0 : time;
+}
+
+/**
+ * Searches every folder except Trash and Junk and returns the newest matches
+ * across all of them. Each folder contributes at most `limit` of its newest
+ * matches, which is enough to fill the combined newest-first page.
+ */
+export async function searchMail(params: SearchMailParams): Promise<SearchMailResult> {
+  const criteria = buildSearchCriteria(params);
+  if (Object.keys(criteria).length === 0) {
+    throw new Error('search_mail needs at least one filter, such as text, subject, from_address or a date range.');
+  }
+  const limit = params.limit ?? 25;
+
+  const client = getClient();
+  await client.connect();
+  try {
+    const folders = (await client.list()).filter((box) => !isSkippedForSearch(box));
+    const hits: SearchMailHit[] = [];
+    let total = 0;
+    for (const folder of folders) {
+      const lock = await client.getMailboxLock(folder.path);
+      try {
+        const uids = await client.search(criteria, { uid: true });
+        if (!uids || uids.length === 0) continue;
+        total += uids.length;
+        const newest = [...uids].sort((a, b) => a - b).slice(-limit);
+        for await (const message of client.fetch(newest, { envelope: true, flags: true, uid: true }, { uid: true })) {
+          hits.push({ ...toSummary(message), folder: folder.path });
+        }
+      } finally {
+        lock.release();
+      }
+    }
+    hits.sort((a, b) => dateValue(b) - dateValue(a));
+    return { messages: hits.slice(0, limit), total, searchedFolders: folders.map((folder) => folder.path) };
   } finally {
     await client.logout();
   }
