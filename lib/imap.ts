@@ -111,7 +111,7 @@ function allowedDestinations(): string[] | null {
 
 /**
  * Refuses a destination the operator has not listed. The Inbox is always
- * permitted, whatever the list says, so that recovering a message and undoing
+ * permitted, whatever the list says, so that moving a message back and undoing
  * a move keep working.
  */
 function assertDestinationAllowed(targetPath: string): void {
@@ -126,17 +126,21 @@ function assertDestinationAllowed(targetPath: string): void {
   );
 }
 
-/** The Trash/Junk rule, which takes precedence over the allowlist below. */
-function assertNotTrashOrJunk(target: MailboxListEntry, targetPath: string): void {
-  if (!isProhibitedDestination(target)) return;
-  // No separate "recovery" exception is needed here: a recovery move (out of
-  // Trash/Junk into an ordinary folder) already returns above, since its
-  // target isn't prohibited. Reaching this point means the target itself is
-  // Trash or Junk, regardless of where the message is coming from — including
-  // a Trash-to-Junk move, which is not a recovery and must stay blocked.
+/**
+ * The Trash/Junk rule, which takes precedence over the allowlist below. It
+ * applies in both directions: nothing is moved into Trash or Junk, and nothing
+ * is taken back out of them, so mail the operator binned or iCloud filed as
+ * spam stays where it is unless they move it themselves.
+ */
+function assertNotTrashOrJunk(
+  mailbox: MailboxListEntry | null,
+  path: string,
+  direction: 'into' | 'out of',
+): void {
+  if (!mailbox || !isProhibitedDestination(mailbox)) return;
   if (process.env.ALLOW_TRASH_JUNK_MOVES === 'true') return; // explicit operator override
   throw new Error(
-    `Moving messages into "${targetPath}" is blocked by default because it is a Trash or Junk folder. ` +
+    `Moving messages ${direction} "${path}" is blocked by default because it is a Trash or Junk folder. ` +
       `This restriction is enforced by the server, not the agent, and has no per-call override. ` +
       `An operator can lift it by setting ALLOW_TRASH_JUNK_MOVES=true in the deployment's environment.`,
   );
@@ -213,7 +217,8 @@ export function assertMoveAllowed(
   }
   assertNotSentOrDrafts(resolveMailbox(mailboxes, sourcePath), sourcePath, 'out of');
   assertNotSentOrDrafts(target, targetPath, 'into');
-  assertNotTrashOrJunk(target, targetPath);
+  assertNotTrashOrJunk(resolveMailbox(mailboxes, sourcePath), sourcePath, 'out of');
+  assertNotTrashOrJunk(target, targetPath, 'into');
   assertDestinationNotBlocked(mailboxes, targetPath);
   assertDestinationAllowed(targetPath);
 }

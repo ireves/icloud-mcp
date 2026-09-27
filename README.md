@@ -183,7 +183,7 @@ Both read from a local `.env` file and print what they find. Run them separately
 
 ## Mailbox safety
 
-`move_message` blocks moves into any folder whose IMAP special-use metadata (or, as a fallback, exact folder name) identifies it as Trash or Junk. This is enforced in the server itself — there is no tool parameter that can override it, and no combination of agent instructions changes it. Moving a message *out of* Trash or Junk (recovery) is always allowed.
+`move_message` blocks moves into or out of any folder whose IMAP special-use metadata (or, as a fallback, exact folder name) identifies it as Trash or Junk. This is enforced in the server itself — there is no tool parameter that can override it, and no combination of agent instructions changes it. Mail in Trash or Junk can still be read, but only you can take it out, from the Mail app.
 
 To lift the restriction, an operator (not the agent) sets `ALLOW_TRASH_JUNK_MOVES=true` in the deployment's environment variables. Leave it unset for the default, safer behaviour.
 
@@ -197,7 +197,7 @@ Sent and Drafts can be read and searched, but no message may be moved into or ou
 
 If an entry matches no folder in the account, every move is refused, and the error names the entry and lists the folders that do exist. A typo in a block list would otherwise leave the folder it meant to protect open, with nothing to say so. Renaming or deleting a listed folder has the same effect until the list is updated.
 
-`INBOX` can never be blocked, so recovering a message and undoing a move keep working.
+`INBOX` can never be blocked, so moving a message back and undoing a move keep working.
 
 ### Restricting destinations to a fixed list
 
@@ -298,7 +298,7 @@ A structured result has to be an object, so the tools that used to return a bare
 
 ## Recovering from a move
 
-Every `move_message` call is durably logged in Supabase for 7 days, independently of the mail server itself. `undo_move` reverses a logged move, but only after re-verifying that the message is still where it was left: it checks the destination folder's UIDVALIDITY hasn't changed and that the message's identity (Message-ID, date, and subject) still matches what was originally moved, before moving anything back. The same Trash/Junk destination policy applies to undo as to the original move.
+Every `move_message` call is durably logged in Supabase for 7 days, independently of the mail server itself. `undo_move` reverses a logged move, but only after re-verifying that the message is still where it was left: it checks the destination folder's UIDVALIDITY hasn't changed and that the message's identity (Message-ID, date, and subject) still matches what was originally moved, before moving anything back. The same Trash/Junk policy applies to undo as to the original move.
 
 Use `list_move_operations` to see recent moves and their status, or `get_move_operation` with an `operation_id` to inspect one in detail. A move can be in one of five states: `pending` (in progress), `confirmed` (completed and undoable), `failed` (didn't happen — nothing to undo), `uncertain` (the mail server's response was ambiguous, so the outcome couldn't be confirmed), or `undone`. Calling `undo_move` on an `uncertain` operation automatically attempts to reconcile it first, by checking both the source and destination folders for the message; if that reconciliation is itself ambiguous, `undo_move` refuses and asks for manual verification rather than guessing.
 

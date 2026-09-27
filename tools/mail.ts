@@ -303,7 +303,7 @@ export function registerMailTools(server: McpServer): void {
     {
       title: 'Move Message',
       description:
-        'Moves a message from one folder to another. Moving into Trash or Junk is blocked by default and enforced by the server (not by this description) — there is no parameter to override it. Moving a message out of Trash or Junk is always allowed. ' +
+        'Moves a message from one folder to another. Moving into or out of Trash or Junk is blocked by default and enforced by the server (not by this description) — there is no parameter to override it. ' +
         "The server also checks the move against the operator's sorting exceptions (see list_exceptions) and refuses one that contradicts them. " +
         "Sent and Drafts can be read but never moved into or out of. " +
         "The operator may also block particular folders, or restrict destinations to an allowlist, in which case the move is refused with the reason. " +
@@ -435,7 +435,7 @@ export function registerMailTools(server: McpServer): void {
     {
       title: 'Undo Message Move',
       description:
-        "Reverses a previous move_message operation, using its operation_id. Verifies the destination folder's UIDVALIDITY and the message's identity before moving anything back, and applies the same Trash/Junk destination policy as move_message in reverse. Operations remain undoable for 7 days. An uncertain operation (the original move could not be confirmed) is automatically reconciled where possible before undoing.",
+        "Reverses a previous move_message operation, using its operation_id. Verifies the destination folder's UIDVALIDITY and the message's identity before moving anything back, and applies the same Trash/Junk policy as move_message in reverse. Operations remain undoable for 7 days. An uncertain operation (the original move could not be confirmed) is automatically reconciled where possible before undoing.",
       inputSchema: {
         operation_id: z.string().describe('The operation_id returned by move_message or a previous undo_move'),
       },

@@ -125,16 +125,25 @@ describe('assertMoveAllowed', () => {
     expect(() => assertMoveAllowed(mailboxes, 'INBOX', 'INBOX.DoesNotExist')).toThrow(/does not exist/);
   });
 
-  it('allows a recovery move out of Trash into an ordinary folder', () => {
-    expect(() => assertMoveAllowed(mailboxes, 'INBOX.Trash', 'INBOX')).not.toThrow();
+  it('blocks a move out of Trash, even back to the Inbox', () => {
+    expect(() => assertMoveAllowed(mailboxes, 'INBOX.Trash', 'INBOX')).toThrow(/out of "INBOX.Trash" is blocked by default/);
   });
 
-  it('allows a recovery move out of Junk into an ordinary folder', () => {
-    expect(() => assertMoveAllowed(mailboxes, 'INBOX.Junk', 'INBOX')).not.toThrow();
+  it('blocks a move out of Junk, even back to the Inbox', () => {
+    expect(() => assertMoveAllowed(mailboxes, 'INBOX.Junk', 'INBOX.Archive')).toThrow(/out of "INBOX.Junk" is blocked by default/);
   });
 
-  it('treats a move from one prohibited folder to another as still blocked (not a recovery)', () => {
+  it('blocks a move out of a Junk folder recognised only by name', () => {
+    expect(() => assertMoveAllowed(mailboxes, 'INBOX.Junk E-mail', 'INBOX')).toThrow(/blocked by default/);
+  });
+
+  it('blocks a move from one prohibited folder to another', () => {
     expect(() => assertMoveAllowed(mailboxes, 'INBOX.Trash', 'INBOX.Junk')).toThrow(/blocked by default/);
+  });
+
+  it('permits a move out of Trash when ALLOW_TRASH_JUNK_MOVES=true', () => {
+    process.env.ALLOW_TRASH_JUNK_MOVES = 'true';
+    expect(() => assertMoveAllowed(mailboxes, 'INBOX.Trash', 'INBOX')).not.toThrow();
   });
 
   it('treats source equal to target as a no-op, even if that folder is Trash', () => {
