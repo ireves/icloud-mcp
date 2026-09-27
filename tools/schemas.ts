@@ -102,6 +102,19 @@ export const moveMessageOutput = {
   note: z.string().optional(),
 };
 
+export const moveMessagesOutput = {
+  moved: z.number().int(),
+  failed: z.number().int(),
+  undoable_for_days: z.number().int(),
+  results: z.array(
+    z.object({
+      uid: z.number().int(),
+      operation_id: z.string().optional(),
+      error: z.string().optional(),
+    }),
+  ),
+};
+
 export const saveDraftOutput = {
   ok: z.literal(true),
   folder: z.string(),

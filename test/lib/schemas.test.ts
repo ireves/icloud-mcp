@@ -37,7 +37,7 @@ describe('every tool declares an output schema', () => {
   });
 
   it('registers the full set of tools', () => {
-    expect(Object.keys(registeredTools())).toHaveLength(24);
+    expect(Object.keys(registeredTools())).toHaveLength(25);
   });
 });
 
@@ -128,6 +128,7 @@ describe('declared schemas accept what the tools actually return', () => {
     ],
     ['list_messages (with more to come)', schemas.listMessagesOutput, { messages: [summary], next_cursor: 33600, total: 40 }],
     ['list_messages (last page)', schemas.listMessagesOutput, { messages: [summary], total: 1 }],
+    ['move_messages', schemas.moveMessagesOutput, { moved: 1, failed: 1, undoable_for_days: 7, results: [{ uid: 1, operation_id: 'op-1' }, { uid: 2, error: 'Move refused' }] }],
     ['search_mail', schemas.searchMailOutput, { messages: [{ ...summary, folder: 'INBOX.Receipts', preview: '[untrusted email preview] Hi' }], total: 30, searched_folders: ['INBOX', 'INBOX.Receipts'], skipped_folders: [{ folder: 'Archive', reason: 'timed out' }], next_cursor: 'abc', matched_by: 'text' }],
     ['mark_scanned', schemas.markScannedOutput, { last_seen_uid: 33536 }],
     ['reconcile_flagged', schemas.reconcileFlaggedOutput, { newly_unflagged: [summary] }],

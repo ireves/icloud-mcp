@@ -13,6 +13,8 @@ import {
   MAX_DRAFT_RECIPIENTS,
   markScanned,
   moveMessage,
+  moveMessages,
+  MAX_BATCH_MOVE,
   reconcileFlagged,
   saveDraft,
   searchMail,
@@ -29,6 +31,7 @@ import {
   listMoveOperationsOutput,
   markScannedOutput,
   moveMessageOutput,
+  moveMessagesOutput,
   okOutput,
   reconcileFlaggedOutput,
   saveDraftOutput,
@@ -327,6 +330,37 @@ export function registerMailTools(server: McpServer): void {
             ? { ok: true, operation_id: operationId, undoable_for_days: 7 }
             : { ok: true, note: 'Source and destination were the same folder; no move was performed.' },
         );
+      } catch (error) {
+        return toErrorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'move_messages',
+    {
+      title: 'Move Several Messages',
+      description:
+        `Moves up to ${MAX_BATCH_MOVE} messages from one folder to the same destination in one call. Use this instead of repeated move_message calls when several messages go to the same place. ` +
+        'Every rule move_message enforces applies here too, checked by the server: the Trash, Junk, Sent and Drafts restrictions, any blocked or allowed destinations, and the operator\'s sorting exceptions for each message\'s sender. ' +
+        'A message that is refused does not stop the others. Each result gives either an operation_id (pass it to undo_move within 7 days to reverse that one message) or the reason it was not moved.',
+      inputSchema: {
+        folder: z.string().describe('Current folder path, shared by all the messages'),
+        uids: z.array(z.number().int().positive()).min(1).max(MAX_BATCH_MOVE).describe('Message UIDs from list_messages or search_mail, all in folder'),
+        target_folder: z.string().describe('Destination folder path'),
+      },
+      outputSchema: moveMessagesOutput,
+    },
+    async (args) => {
+      try {
+        const outcomes = await moveMessages({ folder: args.folder, uids: args.uids, targetFolder: args.target_folder });
+        const moved = outcomes.filter((outcome) => outcome.operationId).length;
+        return toResult({
+          moved,
+          failed: outcomes.length - moved,
+          undoable_for_days: 7,
+          results: outcomes.map((outcome) => ({ uid: outcome.uid, operation_id: outcome.operationId, error: outcome.error })),
+        });
       } catch (error) {
         return toErrorResult(error);
       }
