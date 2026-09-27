@@ -142,6 +142,65 @@ function assertNotTrashOrJunk(target: MailboxListEntry, targetPath: string): voi
   );
 }
 
+// The same kind of fallback as above, for Sent and Drafts.
+const SENT_DRAFTS_NAME_FALLBACK = new Set(['Sent', 'Sent Messages', 'Sent Items', 'Drafts']);
+
+function isSentOrDrafts(mailbox: MailboxListEntry): boolean {
+  if (mailbox.specialUse === '\\Sent' || mailbox.specialUse === '\\Drafts') return true;
+  if (mailbox.specialUse) return false;
+  return SENT_DRAFTS_NAME_FALLBACK.has(mailbox.name);
+}
+
+/**
+ * Sent and Drafts can be read but never moved into or out of. Unlike the
+ * Trash/Junk rule there is no override: nothing in sorting mail needs either.
+ */
+function assertNotSentOrDrafts(mailbox: MailboxListEntry | null, path: string, direction: 'into' | 'out of'): void {
+  if (!mailbox || !isSentOrDrafts(mailbox)) return;
+  throw new Error(
+    `Moving messages ${direction} "${path}" is refused: Sent and Drafts can be read but not moved into or out of. ` +
+      'This check is enforced by the server, not the agent, and has no override.',
+  );
+}
+
+/** The operator's list of extra folders never to move into, or an empty list. */
+function blockedDestinations(): string[] {
+  return (process.env.BLOCKED_MOVE_DESTINATIONS ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Refuses a destination on the operator's block list. An entry that names no
+ * real folder refuses every move instead: it is most likely a typo, and a typo
+ * in a block list would otherwise leave the folder it meant unprotected with
+ * nothing to say so.
+ */
+function assertDestinationNotBlocked(mailboxes: MailboxListEntry[], targetPath: string): void {
+  const blocked = blockedDestinations();
+  if (blocked.length === 0) return;
+  const unknown = blocked.filter(
+    (entry) => !mailboxes.some((m) => foldersEqual(entry, m.path) || foldersEqual(entry, m.name)),
+  );
+  if (unknown.length > 0) {
+    throw new Error(
+      `All moves are refused because BLOCKED_MOVE_DESTINATIONS names ${unknown.map((e) => `"${e}"`).join(', ')}, ` +
+        'which matches no folder in this account (possibly a typo, or a folder that was renamed or deleted). ' +
+        `The folders that exist are: ${mailboxes.map((m) => m.path).join(', ')}. ` +
+        'The operator needs to correct the setting in the deployment\'s environment.',
+    );
+  }
+  if (isInbox(targetPath)) return;
+  const target = resolveMailbox(mailboxes, targetPath);
+  if (blocked.some((entry) => foldersEqual(entry, targetPath) || (target && foldersEqual(entry, target.name)))) {
+    throw new Error(
+      `Moving messages into "${targetPath}" is refused: it is on the operator's list of blocked destinations. ` +
+        'This check is enforced by the server, not the agent, and has no per-call override.',
+    );
+  }
+}
+
 export function assertMoveAllowed(
   mailboxes: MailboxListEntry[],
   sourcePath: string,
@@ -152,7 +211,10 @@ export function assertMoveAllowed(
   if (!target) {
     throw new Error(`Target folder "${targetPath}" does not exist.`);
   }
+  assertNotSentOrDrafts(resolveMailbox(mailboxes, sourcePath), sourcePath, 'out of');
+  assertNotSentOrDrafts(target, targetPath, 'into');
   assertNotTrashOrJunk(target, targetPath);
+  assertDestinationNotBlocked(mailboxes, targetPath);
   assertDestinationAllowed(targetPath);
 }
 

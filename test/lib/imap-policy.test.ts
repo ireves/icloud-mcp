@@ -37,6 +37,63 @@ const JUNK_EMAIL_NO_FLAG: MailboxListEntry = { path: 'INBOX.Junk E-mail', name: 
 const JUNK_RESEARCH_NO_FLAG: MailboxListEntry = { path: 'INBOX.Junk Research', name: 'Junk Research' };
 const ARCHIVE: MailboxListEntry = { path: 'INBOX.Archive', name: 'Archive', specialUse: '\\Archive' };
 
+describe('assertMoveAllowed — Sent, Drafts and the block list', () => {
+  const SENT: MailboxListEntry = { path: 'Sent Messages', name: 'Sent Messages', specialUse: '\\Sent' };
+  const DRAFTS: MailboxListEntry = { path: 'Drafts', name: 'Drafts', specialUse: '\\Drafts' };
+  const SENT_NO_FLAG: MailboxListEntry = { path: 'Sent', name: 'Sent' };
+  const RECEIPTS: MailboxListEntry = { path: 'Receipts', name: 'Receipts' };
+  const WORK_CLIENTS: MailboxListEntry = { path: 'Work/Clients', name: 'Clients' };
+  const mailboxes = [INBOX, TRASH_BY_FLAG, JUNK_BY_FLAG, SENT, DRAFTS, RECEIPTS, WORK_CLIENTS, ARCHIVE];
+
+  afterEach(() => {
+    delete process.env.BLOCKED_MOVE_DESTINATIONS;
+    delete process.env.ALLOWED_MOVE_DESTINATIONS;
+    delete process.env.ALLOW_TRASH_JUNK_MOVES;
+  });
+
+  it('refuses moves into Sent or Drafts', () => {
+    expect(() => assertMoveAllowed(mailboxes, 'INBOX', 'Sent Messages')).toThrow(/read but not moved/);
+    expect(() => assertMoveAllowed(mailboxes, 'INBOX', 'Drafts')).toThrow(/read but not moved/);
+  });
+
+  it('refuses moves out of Sent or Drafts', () => {
+    expect(() => assertMoveAllowed(mailboxes, 'Sent Messages', 'INBOX')).toThrow(/out of "Sent Messages"/);
+    expect(() => assertMoveAllowed(mailboxes, 'Drafts', 'Receipts')).toThrow(/out of "Drafts"/);
+  });
+
+  it('recognises a Sent folder by name when the server gives no special-use flag', () => {
+    expect(() => assertMoveAllowed([INBOX, SENT_NO_FLAG], 'INBOX', 'Sent')).toThrow(/read but not moved/);
+  });
+
+  it('keeps Sent and Drafts blocked even when Trash and Junk moves are switched on', () => {
+    process.env.ALLOW_TRASH_JUNK_MOVES = 'true';
+    expect(() => assertMoveAllowed(mailboxes, 'INBOX', 'Drafts')).toThrow(/read but not moved/);
+  });
+
+  it('allows any other folder, including a new one, when no list is set', () => {
+    expect(() => assertMoveAllowed(mailboxes, 'INBOX', 'Work/Clients')).not.toThrow();
+  });
+
+  it('refuses a folder on the block list, by path or by name, ignoring case and spaces', () => {
+    process.env.BLOCKED_MOVE_DESTINATIONS = ' receipts , Clients';
+    expect(() => assertMoveAllowed(mailboxes, 'INBOX', 'Receipts')).toThrow(/list of blocked destinations/);
+    expect(() => assertMoveAllowed(mailboxes, 'INBOX', 'Work/Clients')).toThrow(/list of blocked destinations/);
+    expect(() => assertMoveAllowed(mailboxes, 'INBOX', 'INBOX.Archive')).not.toThrow();
+  });
+
+  it('refuses every move when the block list names a folder that does not exist, naming it', () => {
+    process.env.BLOCKED_MOVE_DESTINATIONS = 'Receipts, Reciepts';
+    expect(() => assertMoveAllowed(mailboxes, 'INBOX', 'INBOX.Archive')).toThrow(
+      /All moves are refused because BLOCKED_MOVE_DESTINATIONS names "Reciepts"/,
+    );
+  });
+
+  it('never blocks moving back to the Inbox', () => {
+    process.env.BLOCKED_MOVE_DESTINATIONS = 'INBOX';
+    expect(() => assertMoveAllowed(mailboxes, 'Receipts', 'INBOX')).not.toThrow();
+  });
+});
+
 describe('assertMoveAllowed', () => {
   const mailboxes = [INBOX, TRASH_BY_FLAG, JUNK_BY_FLAG, JUNK_EMAIL_NO_FLAG, JUNK_RESEARCH_NO_FLAG, ARCHIVE];
 

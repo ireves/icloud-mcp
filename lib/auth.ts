@@ -75,7 +75,7 @@ export function mcpResource(): string {
 // and a write half, so advertising `icloud:read` and `icloud:write` would
 // promise a distinction the server does not actually enforce. What the server
 // will and will not do to a mailbox is decided by ALLOW_TRASH_JUNK_MOVES and
-// ALLOWED_MOVE_DESTINATIONS, which are the operator's settings, not the
+// ALLOWED_MOVE_DESTINATIONS and BLOCKED_MOVE_DESTINATIONS, which are the operator's settings, not the
 // client's to ask for.
 export const ICLOUD_SCOPE = 'icloud';
 
