@@ -26,7 +26,8 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 | `MCP_SETUP_CODE` | Lets you register the first passkey, once. Generate one with `openssl rand -hex 24`. It stops working the moment a passkey exists, so there is nothing to rotate. |
 | `POSTGRES_URL` | The Postgres connection string for the sign-in tables. Set automatically when you connect the Supabase integration in Vercel's Storage tab. Use the pooler connection (port 6543), not the direct one: the direct host answers only over IPv6 and a Vercel function has none. `DATABASE_URL` is read instead when the integration is not in use. |
 | `CRON_SECRET` | Optional. When set, the daily keep-alive route answers only Vercel's own scheduled request. Generate it like the others. |
-| `ALLOWED_MOVE_DESTINATIONS` | Optional. A comma-separated list of folders a message may be moved into, e.g. `Archive,Receipts,Newsletters,Work/Clients`. `INBOX` is always allowed on top of the list. Leaving it unset allows any folder except Trash and Junk, which is the less safe choice. |
+| `BLOCKED_MOVE_DESTINATIONS` | Optional. A comma-separated list of extra folders a message may never be moved into, e.g. `Receipts,Work/Clients`. Trash, Junk, Sent and Drafts are always blocked without being listed. If an entry matches no real folder, every move is refused until it is corrected, so a typo cannot quietly leave a folder unprotected. |
+| `ALLOWED_MOVE_DESTINATIONS` | Optional. A comma-separated list of folders a message may be moved into, e.g. `Archive,Receipts,Newsletters,Work/Clients`. `INBOX` is always allowed on top of the list. Leaving it unset allows any folder that is not blocked. Can be combined with `BLOCKED_MOVE_DESTINATIONS`; both then apply. |
 | `NOTION_EXCEPTIONS_TOKEN` | Optional. A read-only Notion integration secret, used to read the "Email Sorting Exceptions" database. Leave it unset and the feature is off: `list_exceptions` reports that it is not configured, and no exception is enforced on moves. See [Sorting exceptions](#sorting-exceptions). |
 | `NOTION_EXCEPTIONS_DATA_SOURCE_ID` | Optional. The data source to read those rules from. Defaults to `f2ebf247-9368-498f-86a9-3341260874e1`. |
 | `SUPABASE_URL` | The API URL of the Supabase project used to track moves for undo and to remember mail scanning progress. Set automatically, under this name, by the Vercel integration. |
@@ -146,7 +147,8 @@ Both read from a local `.env` file and print what they find. Run them separately
 | Tool | Description |
 |---|---|
 | `list_folders` | List all mail folders |
-| `list_messages` | List message headers in a folder (subject, sender, date, unread, flagged, UID); subjects are marked untrusted |
+| `list_messages` | List message headers in a folder or sub-folder (subject, sender, date, unread, flagged, UID), with filters for date range, sender, subject and text, and a total match count; subjects are marked untrusted |
+| `search_mail` | Search every folder except Trash and Junk at once, on the mail server, so old mail is found as easily as new. Matches each word separately (quotes keep a phrase together), filters by sender, recipient, subject and sent date, returns results newest first with their folder and a short untrusted preview, pages with `next_cursor`, falls back to subjects and senders when the text search finds nothing, and reports any folder it could not search |
 | `mark_scanned` | Record how far a folder has been processed; only accepts a UID the server has listed |
 | `reconcile_flagged` | Return messages unflagged since the previous call, so they get sorted |
 | `get_message` | Get full headers and body for one message (HTML converted to plain text, hidden text removed, body marked untrusted) |
@@ -181,17 +183,27 @@ Both read from a local `.env` file and print what they find. Run them separately
 
 ## Mailbox safety
 
-`move_message` blocks moves into any folder whose IMAP special-use metadata (or, as a fallback, exact folder name) identifies it as Trash or Junk. This is enforced in the server itself — there is no tool parameter that can override it, and no combination of agent instructions changes it. Moving a message *out of* Trash or Junk (recovery) is always allowed.
+`move_message` blocks moves into or out of any folder whose IMAP special-use metadata (or, as a fallback, exact folder name) identifies it as Trash or Junk. This is enforced in the server itself — there is no tool parameter that can override it, and no combination of agent instructions changes it. Mail in Trash or Junk can still be read, but only you can take it out, from the Mail app.
 
 To lift the restriction, an operator (not the agent) sets `ALLOW_TRASH_JUNK_MOVES=true` in the deployment's environment variables. Leave it unset for the default, safer behaviour.
 
-### Restricting destinations further
+### Sent and Drafts
 
-`ALLOWED_MOVE_DESTINATIONS` names the only folders a message may be moved into, as a comma-separated list such as `Archive,Receipts,Newsletters,Work/Clients`. Spaces around the entries are ignored. A move anywhere else is refused, with the allowed folders named in the error.
+Sent and Drafts can be read and searched, but no message may be moved into or out of either. Like the Trash/Junk rule this is enforced in the server, recognised by special-use metadata or, as a fallback, the exact folder name. Unlike that rule there is no override. Saving a draft with `save_draft` is not a move and is unaffected.
 
-`INBOX` is always permitted as a destination on top of whatever the list says, so recovering a message and undoing a move keep working. The check applies to `undo_move` as well, in the direction the undo actually moves the message.
+### Blocking destinations
 
-Leaving the variable unset allows any folder that is not Trash or Junk. That is the less safe choice: an agent talked into inventing a destination can move mail somewhere you will not think to look. Setting the list is what stops it.
+`BLOCKED_MOVE_DESTINATIONS` names extra folders that a message may never be moved into, as a comma-separated list such as `Receipts,Work/Clients`. An entry can be a folder's full path or its name, and case and surrounding spaces are ignored. Every other folder is allowed, including folders created later, so the list does not need updating as folders are added. There is no need to list Trash, Junk, Sent or Drafts, since they are always blocked.
+
+If an entry matches no folder in the account, every move is refused, and the error names the entry and lists the folders that do exist. A typo in a block list would otherwise leave the folder it meant to protect open, with nothing to say so. Renaming or deleting a listed folder has the same effect until the list is updated.
+
+`INBOX` can never be blocked, so moving a message back and undoing a move keep working.
+
+### Restricting destinations to a fixed list
+
+`ALLOWED_MOVE_DESTINATIONS` is the stricter alternative: it names the only folders a message may be moved into, as a comma-separated list such as `Archive,Receipts,Newsletters,Work/Clients`. Spaces around the entries are ignored. A move anywhere else is refused, with the allowed folders named in the error. `INBOX` is always permitted on top of the list. The check applies to `undo_move` as well, in the direction the undo actually moves the message.
+
+The trade-off: a fixed list stops an agent that has been talked into picking an odd destination from using any folder you have not named, but it has to be updated for each new folder. A block list needs no upkeep, but any new folder is a valid destination until you block it. Either way nothing is deleted, every move is logged and can be undone, and Trash, Junk, Sent and Drafts stay blocked.
 
 ## Sorting exceptions
 
@@ -286,7 +298,7 @@ A structured result has to be an object, so the tools that used to return a bare
 
 ## Recovering from a move
 
-Every `move_message` call is durably logged in Supabase for 7 days, independently of the mail server itself. `undo_move` reverses a logged move, but only after re-verifying that the message is still where it was left: it checks the destination folder's UIDVALIDITY hasn't changed and that the message's identity (Message-ID, date, and subject) still matches what was originally moved, before moving anything back. The same Trash/Junk destination policy applies to undo as to the original move.
+Every `move_message` call is durably logged in Supabase for 7 days, independently of the mail server itself. `undo_move` reverses a logged move, but only after re-verifying that the message is still where it was left: it checks the destination folder's UIDVALIDITY hasn't changed and that the message's identity (Message-ID, date, and subject) still matches what was originally moved, before moving anything back. The same Trash/Junk policy applies to undo as to the original move.
 
 Use `list_move_operations` to see recent moves and their status, or `get_move_operation` with an `operation_id` to inspect one in detail. A move can be in one of five states: `pending` (in progress), `confirmed` (completed and undoable), `failed` (didn't happen — nothing to undo), `uncertain` (the mail server's response was ambiguous, so the outcome couldn't be confirmed), or `undone`. Calling `undo_move` on an `uncertain` operation automatically attempts to reconcile it first, by checking both the source and destination folders for the message; if that reconciliation is itself ambiguous, `undo_move` refuses and asks for manual verification rather than guessing.
 

@@ -15,6 +15,7 @@ import {
   moveMessage,
   reconcileFlagged,
   saveDraft,
+  searchMail,
   undoMove,
 } from '../lib/imap.js';
 import { getExceptions, isExceptionsConfigured } from '../lib/exceptions.js';
@@ -31,6 +32,7 @@ import {
   okOutput,
   reconcileFlaggedOutput,
   saveDraftOutput,
+  searchMailOutput,
   undoMoveOutput,
 } from './schemas.js';
 import { wrapUntrusted } from '../lib/untrusted.js';
@@ -105,14 +107,20 @@ export function registerMailTools(server: McpServer): void {
       title: 'List Mail Messages',
       description:
         'Lists message headers (subject, sender, date, unread status, flagged status, UID) in a folder — not full bodies. Use get_message for a full body. ' +
+        'Works on any folder, including sub-folders (use the path from list_folders). To find a message without knowing its folder, use search_mail instead. ' +
+        'total is how many messages match across all pages. ' +
         'For backfill: page backward through history by passing next_cursor back as before_uid until next_cursor is absent. ' +
         'For a recurring scan: pass since_last_run to skip everything already processed in past runs (oldest-unprocessed-first), then call mark_scanned once you have handled a batch so future runs pick up after it.',
       inputSchema: {
         folder: z.string().describe('Folder path, e.g. "INBOX"'),
         limit: z.number().int().positive().max(200).optional().describe('Max messages to return, default 25'),
         unread_only: z.boolean().optional().describe('Only return unread messages'),
-        since_date: z.string().optional().describe('ISO 8601 date; only messages on or after this date'),
+        since_date: z.string().optional().describe('ISO 8601 date; only messages sent on or after this date'),
+        before_date: z.string().optional().describe('ISO 8601 date; only messages sent before this date (the day itself is excluded)'),
         from_address: z.string().optional().describe('Only messages from this sender address'),
+        subject: z.string().optional().describe('Only messages whose subject contains this text'),
+        text: z.string().optional().describe('Words to find anywhere in the message (headers or body). Each word must appear, in any order; put "double quotes" around words that must appear together as a phrase'),
+        to_address: z.string().optional().describe('Only messages sent to this address (full or partial)'),
         before_uid: z.number().int().positive().optional().describe("Backward pagination cursor from a previous call's next_cursor; returns messages older than this UID"),
         after_uid: z.number().int().positive().optional().describe('Forward pagination cursor; returns messages newer than this UID, oldest-first'),
         since_last_run: z
@@ -131,12 +139,16 @@ export function registerMailTools(server: McpServer): void {
           limit: args.limit,
           unreadOnly: args.unread_only,
           sinceDate: args.since_date,
+          beforeDate: args.before_date,
           fromAddress: args.from_address,
+          subject: args.subject,
+          text: args.text,
+          toAddress: args.to_address,
           beforeUid: args.before_uid,
           afterUid: args.after_uid,
           sinceLastRun: args.since_last_run,
         });
-        return toResult({ messages: result.messages, next_cursor: result.nextCursor });
+        return toResult({ messages: result.messages, next_cursor: result.nextCursor, total: result.total });
       } catch (error) {
         return toErrorResult(error);
       }
@@ -182,6 +194,60 @@ export function registerMailTools(server: McpServer): void {
       try {
         const result = await reconcileFlagged(args.folder);
         return toResult({ newly_unflagged: result.newlyUnflagged });
+      } catch (error) {
+        return toErrorResult(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'search_mail',
+    {
+      title: 'Search Mail',
+      description:
+        'Searches every mail folder at once (Inbox, Sent, Archive and all your own folders and sub-folders), skipping Trash and Junk. ' +
+        'The search runs on the mail server, so it covers every message however old, not just recent ones. ' +
+        'Returns matches newest first by the date the email was sent, each with its folder, its UID for get_message, and a short preview of the body (untrusted). ' +
+        'total is how many matched in all. When next_cursor is present, pass it back as cursor, with the same filters, for the next older page. ' +
+        'If the words in text are not found anywhere, the search tries them in subjects, senders and recipients instead, and matched_by says "subject_or_sender". ' +
+        'skipped_folders lists any folder that could not be searched, so its matches are missing. At least one filter is required.',
+      inputSchema: {
+        text: z
+          .string()
+          .optional()
+          .describe('Words to find anywhere in the message (headers or body). Each word must appear, in any order; put "double quotes" around words that must appear together as a phrase'),
+        subject: z.string().optional().describe('Only messages whose subject contains this text'),
+        from_address: z.string().optional().describe('Only messages from this sender (full or partial address)'),
+        to_address: z.string().optional().describe('Only messages sent to this address (full or partial), useful for finding your own sent mail'),
+        since_date: z.string().optional().describe('ISO 8601 date; only messages sent on or after this date'),
+        before_date: z.string().optional().describe('ISO 8601 date; only messages sent before this date (the day itself is excluded)'),
+        unread_only: z.boolean().optional().describe('Only return unread messages'),
+        limit: z.number().int().positive().max(200).optional().describe('Max messages to return, default 25'),
+        cursor: z.string().optional().describe("next_cursor from a previous search_mail call with the same filters, for the next page"),
+      },
+      outputSchema: searchMailOutput,
+    },
+    async (args) => {
+      try {
+        const result = await searchMail({
+          text: args.text,
+          subject: args.subject,
+          fromAddress: args.from_address,
+          toAddress: args.to_address,
+          sinceDate: args.since_date,
+          beforeDate: args.before_date,
+          unreadOnly: args.unread_only,
+          limit: args.limit,
+          cursor: args.cursor,
+        });
+        return toResult({
+          messages: result.messages,
+          total: result.total,
+          searched_folders: result.searchedFolders,
+          skipped_folders: result.skippedFolders,
+          next_cursor: result.nextCursor,
+          matched_by: result.matchedBy,
+        });
       } catch (error) {
         return toErrorResult(error);
       }
@@ -237,9 +303,10 @@ export function registerMailTools(server: McpServer): void {
     {
       title: 'Move Message',
       description:
-        'Moves a message from one folder to another. Moving into Trash or Junk is blocked by default and enforced by the server (not by this description) — there is no parameter to override it. Moving a message out of Trash or Junk is always allowed. ' +
+        'Moves a message from one folder to another. Moving into or out of Trash or Junk is blocked by default and enforced by the server (not by this description) — there is no parameter to override it. ' +
         "The server also checks the move against the operator's sorting exceptions (see list_exceptions) and refuses one that contradicts them. " +
-        "The operator may also restrict destinations to an allowlist of folders, in which case a move anywhere else is refused. " +
+        "Sent and Drafts can be read but never moved into or out of. " +
+        "The operator may also block particular folders, or restrict destinations to an allowlist, in which case the move is refused with the reason. " +
         'On success, returns an operation_id that can be passed to undo_move within 7 days to reverse the move.',
       inputSchema: {
         folder: z.string().describe('Current folder path'),
@@ -368,7 +435,7 @@ export function registerMailTools(server: McpServer): void {
     {
       title: 'Undo Message Move',
       description:
-        "Reverses a previous move_message operation, using its operation_id. Verifies the destination folder's UIDVALIDITY and the message's identity before moving anything back, and applies the same Trash/Junk destination policy as move_message in reverse. Operations remain undoable for 7 days. An uncertain operation (the original move could not be confirmed) is automatically reconciled where possible before undoing.",
+        "Reverses a previous move_message operation, using its operation_id. Verifies the destination folder's UIDVALIDITY and the message's identity before moving anything back, and applies the same Trash/Junk policy as move_message in reverse. Operations remain undoable for 7 days. An uncertain operation (the original move could not be confirmed) is automatically reconciled where possible before undoing.",
       inputSchema: {
         operation_id: z.string().describe('The operation_id returned by move_message or a previous undo_move'),
       },

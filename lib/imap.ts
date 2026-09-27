@@ -111,7 +111,7 @@ function allowedDestinations(): string[] | null {
 
 /**
  * Refuses a destination the operator has not listed. The Inbox is always
- * permitted, whatever the list says, so that recovering a message and undoing
+ * permitted, whatever the list says, so that moving a message back and undoing
  * a move keep working.
  */
 function assertDestinationAllowed(targetPath: string): void {
@@ -126,20 +126,83 @@ function assertDestinationAllowed(targetPath: string): void {
   );
 }
 
-/** The Trash/Junk rule, which takes precedence over the allowlist below. */
-function assertNotTrashOrJunk(target: MailboxListEntry, targetPath: string): void {
-  if (!isProhibitedDestination(target)) return;
-  // No separate "recovery" exception is needed here: a recovery move (out of
-  // Trash/Junk into an ordinary folder) already returns above, since its
-  // target isn't prohibited. Reaching this point means the target itself is
-  // Trash or Junk, regardless of where the message is coming from — including
-  // a Trash-to-Junk move, which is not a recovery and must stay blocked.
+/**
+ * The Trash/Junk rule, which takes precedence over the allowlist below. It
+ * applies in both directions: nothing is moved into Trash or Junk, and nothing
+ * is taken back out of them, so mail the operator binned or iCloud filed as
+ * spam stays where it is unless they move it themselves.
+ */
+function assertNotTrashOrJunk(
+  mailbox: MailboxListEntry | null,
+  path: string,
+  direction: 'into' | 'out of',
+): void {
+  if (!mailbox || !isProhibitedDestination(mailbox)) return;
   if (process.env.ALLOW_TRASH_JUNK_MOVES === 'true') return; // explicit operator override
   throw new Error(
-    `Moving messages into "${targetPath}" is blocked by default because it is a Trash or Junk folder. ` +
+    `Moving messages ${direction} "${path}" is blocked by default because it is a Trash or Junk folder. ` +
       `This restriction is enforced by the server, not the agent, and has no per-call override. ` +
       `An operator can lift it by setting ALLOW_TRASH_JUNK_MOVES=true in the deployment's environment.`,
   );
+}
+
+// The same kind of fallback as above, for Sent and Drafts.
+const SENT_DRAFTS_NAME_FALLBACK = new Set(['Sent', 'Sent Messages', 'Sent Items', 'Drafts']);
+
+function isSentOrDrafts(mailbox: MailboxListEntry): boolean {
+  if (mailbox.specialUse === '\\Sent' || mailbox.specialUse === '\\Drafts') return true;
+  if (mailbox.specialUse) return false;
+  return SENT_DRAFTS_NAME_FALLBACK.has(mailbox.name);
+}
+
+/**
+ * Sent and Drafts can be read but never moved into or out of. Unlike the
+ * Trash/Junk rule there is no override: nothing in sorting mail needs either.
+ */
+function assertNotSentOrDrafts(mailbox: MailboxListEntry | null, path: string, direction: 'into' | 'out of'): void {
+  if (!mailbox || !isSentOrDrafts(mailbox)) return;
+  throw new Error(
+    `Moving messages ${direction} "${path}" is refused: Sent and Drafts can be read but not moved into or out of. ` +
+      'This check is enforced by the server, not the agent, and has no override.',
+  );
+}
+
+/** The operator's list of extra folders never to move into, or an empty list. */
+function blockedDestinations(): string[] {
+  return (process.env.BLOCKED_MOVE_DESTINATIONS ?? '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Refuses a destination on the operator's block list. An entry that names no
+ * real folder refuses every move instead: it is most likely a typo, and a typo
+ * in a block list would otherwise leave the folder it meant unprotected with
+ * nothing to say so.
+ */
+function assertDestinationNotBlocked(mailboxes: MailboxListEntry[], targetPath: string): void {
+  const blocked = blockedDestinations();
+  if (blocked.length === 0) return;
+  const unknown = blocked.filter(
+    (entry) => !mailboxes.some((m) => foldersEqual(entry, m.path) || foldersEqual(entry, m.name)),
+  );
+  if (unknown.length > 0) {
+    throw new Error(
+      `All moves are refused because BLOCKED_MOVE_DESTINATIONS names ${unknown.map((e) => `"${e}"`).join(', ')}, ` +
+        'which matches no folder in this account (possibly a typo, or a folder that was renamed or deleted). ' +
+        `The folders that exist are: ${mailboxes.map((m) => m.path).join(', ')}. ` +
+        'The operator needs to correct the setting in the deployment\'s environment.',
+    );
+  }
+  if (isInbox(targetPath)) return;
+  const target = resolveMailbox(mailboxes, targetPath);
+  if (blocked.some((entry) => foldersEqual(entry, targetPath) || (target && foldersEqual(entry, target.name)))) {
+    throw new Error(
+      `Moving messages into "${targetPath}" is refused: it is on the operator's list of blocked destinations. ` +
+        'This check is enforced by the server, not the agent, and has no per-call override.',
+    );
+  }
 }
 
 export function assertMoveAllowed(
@@ -152,7 +215,11 @@ export function assertMoveAllowed(
   if (!target) {
     throw new Error(`Target folder "${targetPath}" does not exist.`);
   }
-  assertNotTrashOrJunk(target, targetPath);
+  assertNotSentOrDrafts(resolveMailbox(mailboxes, sourcePath), sourcePath, 'out of');
+  assertNotSentOrDrafts(target, targetPath, 'into');
+  assertNotTrashOrJunk(resolveMailbox(mailboxes, sourcePath), sourcePath, 'out of');
+  assertNotTrashOrJunk(target, targetPath, 'into');
+  assertDestinationNotBlocked(mailboxes, targetPath);
   assertDestinationAllowed(targetPath);
 }
 
@@ -424,7 +491,11 @@ export interface ListMessagesParams {
   limit?: number;
   unreadOnly?: boolean;
   sinceDate?: string;
+  beforeDate?: string;
   fromAddress?: string;
+  toAddress?: string;
+  subject?: string;
+  text?: string;
   beforeUid?: number;
   afterUid?: number;
   sinceLastRun?: boolean;
@@ -433,6 +504,87 @@ export interface ListMessagesParams {
 export interface ListMessagesResult {
   messages: MessageSummary[];
   nextCursor?: number;
+  /** How many messages in the folder match the filters, across all pages. */
+  total: number;
+}
+
+interface SearchFilters {
+  unreadOnly?: boolean;
+  sinceDate?: string;
+  beforeDate?: string;
+  fromAddress?: string;
+  toAddress?: string;
+  subject?: string;
+  text?: string;
+}
+
+type Criteria = Record<string, unknown>;
+
+/**
+ * A search split into one IMAP query per term. The server matches TEXT as one
+ * exact phrase, so "Amazon refund" would miss an email that has both words
+ * apart. Each word is searched on its own instead, and a message must match
+ * every one (see searchEveryTerm).
+ */
+interface SearchPlan {
+  base: Criteria;
+  terms: Criteria[];
+}
+
+function parseFilterDate(name: string, value: string): Date {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw new Error(`${name} is not a valid date: "${value}"`);
+  return date;
+}
+
+/**
+ * Words to match separately. Text inside double quotes stays together as one
+ * exact phrase, so "order 1234" can still be searched as written.
+ */
+export function splitSearchTerms(text: string): string[] {
+  const terms: string[] = [];
+  for (const match of text.matchAll(/"([^"]*)"|(\S+)/g)) {
+    const term = (match[1] ?? match[2] ?? '').trim();
+    if (term && !terms.includes(term)) terms.push(term);
+  }
+  return terms;
+}
+
+/**
+ * The IMAP search shared by list_messages and search_mail. Dates are compared
+ * with the date the email was sent (its Date header, the one Mail shows),
+ * rather than when it reached this server, which for imported or moved mail
+ * can be years later.
+ */
+function buildSearchPlan(filters: SearchFilters): SearchPlan {
+  const base: Criteria = {};
+  if (filters.unreadOnly) base.seen = false;
+  if (filters.sinceDate) base.sentSince = parseFilterDate('since_date', filters.sinceDate);
+  if (filters.beforeDate) base.sentBefore = parseFilterDate('before_date', filters.beforeDate);
+  if (filters.fromAddress) base.from = filters.fromAddress;
+  if (filters.toAddress) base.to = filters.toAddress;
+  if (filters.subject) base.subject = filters.subject;
+  const terms = filters.text ? splitSearchTerms(filters.text).map((term) => ({ text: term })) : [];
+  return { base, terms };
+}
+
+/**
+ * Runs the plan against the open folder: one search per term, keeping only
+ * the UIDs that match all of them. Returns ascending UIDs.
+ */
+async function searchEveryTerm(client: ImapFlow, plan: SearchPlan): Promise<number[]> {
+  if (plan.terms.length === 0) {
+    const query = Object.keys(plan.base).length > 0 ? plan.base : { all: true };
+    return ((await client.search(query, { uid: true })) || []).sort((a, b) => a - b);
+  }
+  let matched: number[] | null = null;
+  for (const term of plan.terms) {
+    const uids: number[] = (await client.search({ ...plan.base, ...term }, { uid: true })) || [];
+    const keep: Set<number> | null = matched === null ? null : new Set<number>(matched);
+    matched = keep === null ? uids : uids.filter((uid) => keep.has(uid));
+    if (matched.length === 0) break;
+  }
+  return [...(matched ?? [])].sort((a, b) => a - b);
 }
 
 export async function listMessages(params: ListMessagesParams): Promise<ListMessagesResult> {
@@ -448,18 +600,15 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
         if (lastSeen !== null) afterUid = afterUid !== undefined ? Math.max(afterUid, lastSeen) : lastSeen;
       }
 
-      const searchCriteria: Record<string, unknown> = {};
-      if (params.unreadOnly) searchCriteria.seen = false;
-      if (params.sinceDate) searchCriteria.since = new Date(params.sinceDate);
-      if (params.fromAddress) searchCriteria.from = params.fromAddress;
+      const plan = buildSearchPlan(params);
       // Flagged messages are excluded from the since-last-run scan entirely
       // so they never block the high-water mark; reconcileFlagged() is how
       // an unflagged message gets picked back up for sorting later.
-      if (params.sinceLastRun) searchCriteria.flagged = false;
-      const query = Object.keys(searchCriteria).length > 0 ? searchCriteria : { all: true };
+      if (params.sinceLastRun) plan.base.flagged = false;
 
-      let uids = await client.search(query, { uid: true });
-      if (!uids || uids.length === 0) return { messages: [] };
+      let uids = await searchEveryTerm(client, plan);
+      if (uids.length === 0) return { messages: [], total: 0 };
+      const total = uids.length;
 
       const limit = params.limit ?? 25;
 
@@ -467,7 +616,7 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
         // Forward pagination: oldest-unprocessed-first, so a run that stops
         // partway through still advances the high-water mark sequentially.
         uids = uids.filter((uid) => uid > afterUid!).sort((a, b) => a - b);
-        if (uids.length === 0) return { messages: [] };
+        if (uids.length === 0) return { messages: [], total };
 
         const hasMore = uids.length > limit;
         const limited = uids.slice(0, limit);
@@ -478,13 +627,13 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
         results.sort((a, b) => a.uid - b.uid);
         await recordListed(params.folder, results, uidValidity);
         const nextCursor = hasMore ? results[results.length - 1]?.uid : undefined;
-        return { messages: results, nextCursor };
+        return { messages: results, nextCursor, total };
       }
 
       if (params.beforeUid !== undefined) {
         uids = uids.filter((uid) => uid < params.beforeUid!);
       }
-      if (uids.length === 0) return { messages: [] };
+      if (uids.length === 0) return { messages: [], total };
 
       const hasMore = uids.length > limit;
       const limited = uids.slice(-limit).reverse();
@@ -495,12 +644,247 @@ export async function listMessages(params: ListMessagesParams): Promise<ListMess
       results.sort((a, b) => b.uid - a.uid);
       await recordListed(params.folder, results, uidValidity);
       const nextCursor = hasMore ? results[results.length - 1]?.uid : undefined;
-      return { messages: results, nextCursor };
+      return { messages: results, nextCursor, total };
     } finally {
       lock.release();
     }
   } finally {
     await client.logout();
+  }
+}
+
+export interface SearchMailParams extends SearchFilters {
+  limit?: number;
+  /** next_cursor from a previous search_mail call with the same filters. */
+  cursor?: string;
+}
+
+export interface SearchMailHit extends MessageSummary {
+  folder: string;
+  /** The start of the message body, marked untrusted. Absent if it could not be read. */
+  preview?: string;
+}
+
+export interface SkippedFolder {
+  folder: string;
+  reason: string;
+}
+
+export interface SearchMailResult {
+  messages: SearchMailHit[];
+  /** How many messages matched across every searched folder. */
+  total: number;
+  searchedFolders: string[];
+  /** Folders that could not be searched; their matches are missing from total and messages. */
+  skippedFolders: SkippedFolder[];
+  /** Pass back as cursor for the next, older page. Absent on the last page. */
+  nextCursor?: string;
+  /**
+   * 'subject_or_sender' when the text search found nothing and the words were
+   * looked for in subjects, senders and recipients instead.
+   */
+  matchedBy?: 'text' | 'subject_or_sender';
+}
+
+/** How many folders are searched at once. iCloud limits connections per account, so this stays small. */
+const SEARCH_CONCURRENCY = 3;
+/** How much of each result's source is read to build its preview. */
+const PREVIEW_SOURCE_BYTES = 24 * 1024;
+const PREVIEW_CHARS = 240;
+
+/** Folders search_mail skips: Trash and Junk, plus containers that hold no mail. */
+function isSkippedForSearch(mailbox: MailboxListEntry & { flags?: Set<string> }): boolean {
+  if (mailbox.flags?.has('\\Noselect') || mailbox.flags?.has('\\NonExistent')) return true;
+  return isProhibitedDestination(mailbox);
+}
+
+function dateValue(message: MessageSummary): number {
+  const time = Date.parse(message.date);
+  return Number.isNaN(time) ? 0 : time;
+}
+
+interface CursorPosition {
+  date: number;
+  folder: string;
+  uid: number;
+}
+
+/** Newest first; ties broken by folder, then by UID, so the order is total and stable between calls. */
+function compareHits(a: CursorPosition, b: CursorPosition): number {
+  if (a.date !== b.date) return b.date - a.date;
+  if (a.folder !== b.folder) return a.folder < b.folder ? -1 : 1;
+  return b.uid - a.uid;
+}
+
+function positionOf(hit: SearchMailHit): CursorPosition {
+  return { date: dateValue(hit), folder: hit.folder, uid: hit.uid };
+}
+
+function encodeCursor(position: CursorPosition): string {
+  return Buffer.from(JSON.stringify([position.date, position.folder, position.uid])).toString('base64url');
+}
+
+function decodeCursor(cursor: string): CursorPosition {
+  try {
+    const [date, folder, uid] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    if (typeof date === 'number' && typeof folder === 'string' && typeof uid === 'number') {
+      return { date, folder, uid };
+    }
+  } catch {
+    // Falls through to the error below.
+  }
+  throw new Error('cursor is not a next_cursor returned by search_mail.');
+}
+
+function errorReason(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The fallback for a text search that found nothing: each word in the subject, sender or recipient. */
+function subjectOrSenderPlan(plan: SearchPlan, text: string): SearchPlan {
+  return {
+    base: plan.base,
+    terms: splitSearchTerms(text).map((word) => ({ or: [{ subject: word }, { from: word }, { to: word }] })),
+  };
+}
+
+interface FolderScan {
+  hits: SearchMailHit[];
+  skipped: SkippedFolder[];
+}
+
+/**
+ * Searches the folders over a few connections at once. A folder that fails is
+ * reported as skipped rather than failing the whole search, and a connection
+ * that drops hands its remaining folders to the others.
+ */
+async function scanFolders(clients: ImapFlow[], folders: string[], plan: SearchPlan): Promise<FolderScan> {
+  const queue = [...folders];
+  const hits: SearchMailHit[] = [];
+  const skipped: SkippedFolder[] = [];
+
+  const worker = async (client: ImapFlow) => {
+    for (let folder = queue.shift(); folder !== undefined; folder = queue.shift()) {
+      try {
+        const lock = await client.getMailboxLock(folder);
+        try {
+          const uids = await searchEveryTerm(client, plan);
+          if (uids.length === 0) continue;
+          // Every match is read, not just the highest UIDs: UIDs follow the
+          // order mail was added to the folder, so an old email filed last
+          // month would otherwise count as new. Envelopes are small.
+          for await (const message of client.fetch(uids, { envelope: true, flags: true, uid: true }, { uid: true })) {
+            hits.push({ ...toSummary(message), folder });
+          }
+        } finally {
+          lock.release();
+        }
+      } catch (error) {
+        skipped.push({ folder, reason: errorReason(error) });
+        if (client.usable === false) return;
+      }
+    }
+  };
+
+  await Promise.all(clients.map(worker));
+  for (const folder of queue) skipped.push({ folder, reason: 'Not searched: the connection to iCloud was lost.' });
+  return { hits, skipped };
+}
+
+/** Adds a short, untrusted preview of each message's body. A preview that cannot be read is left out. */
+async function addPreviews(client: ImapFlow, hits: SearchMailHit[]): Promise<void> {
+  const byFolder = new Map<string, SearchMailHit[]>();
+  for (const hit of hits) byFolder.set(hit.folder, [...(byFolder.get(hit.folder) ?? []), hit]);
+
+  for (const [folder, folderHits] of byFolder) {
+    try {
+      const lock = await client.getMailboxLock(folder);
+      try {
+        const sources = new Map<number, Buffer>();
+        const uids = folderHits.map((hit) => hit.uid);
+        const query = { uid: true, source: { start: 0, maxLength: PREVIEW_SOURCE_BYTES } };
+        for await (const message of client.fetch(uids, query, { uid: true })) {
+          if (message.source) sources.set(message.uid, message.source);
+        }
+        for (const hit of folderHits) {
+          const body = (await extractBody(sources.get(hit.uid)).catch(() => '')).replace(/\s+/g, ' ').trim();
+          if (!body) continue;
+          const preview = body.length > PREVIEW_CHARS ? `${body.slice(0, PREVIEW_CHARS)}…` : body;
+          hit.preview = tagUntrustedInline('EMAIL PREVIEW', preview);
+        }
+      } finally {
+        lock.release();
+      }
+    } catch {
+      // Previews are a convenience; the results stand without them.
+    }
+  }
+}
+
+/**
+ * Searches every folder except Trash and Junk and returns one page of
+ * matches across all of them, newest first by sent date.
+ */
+export async function searchMail(params: SearchMailParams): Promise<SearchMailResult> {
+  const plan = buildSearchPlan(params);
+  if (Object.keys(plan.base).length === 0 && plan.terms.length === 0) {
+    throw new Error(
+      'search_mail needs at least one filter, such as text, subject, from_address, to_address or a date range.',
+    );
+  }
+  const after = params.cursor ? decodeCursor(params.cursor) : null;
+  const limit = params.limit ?? 25;
+
+  const clients: ImapFlow[] = [];
+  try {
+    const first = getClient();
+    clients.push(first);
+    await first.connect();
+    const folders = (await first.list()).filter((box) => !isSkippedForSearch(box)).map((box) => box.path);
+
+    // Extra connections are a speed-up only: if iCloud refuses one, the
+    // search carries on with the connections it has.
+    for (let i = 1; i < Math.min(SEARCH_CONCURRENCY, folders.length); i++) {
+      const extra = getClient();
+      try {
+        await extra.connect();
+        clients.push(extra);
+      } catch {
+        break;
+      }
+    }
+
+    let matchedBy: SearchMailResult['matchedBy'];
+    let scan = await scanFolders(clients, folders, plan);
+    if (plan.terms.length > 0) matchedBy = 'text';
+    if (params.text && scan.hits.length === 0 && scan.skipped.length < folders.length) {
+      const fallback = await scanFolders(clients, folders, subjectOrSenderPlan(plan, params.text));
+      if (fallback.hits.length > 0) {
+        scan = fallback;
+        matchedBy = 'subject_or_sender';
+      }
+    }
+    const liveClient = clients.find((client) => client.usable !== false);
+    if (!liveClient && scan.skipped.length === folders.length && folders.length > 0) {
+      throw new Error(`search_mail could not search any folder: ${scan.skipped[0].reason}`);
+    }
+
+    const ordered = scan.hits.sort((a, b) => compareHits(positionOf(a), positionOf(b)));
+    const remaining = after ? ordered.filter((hit) => compareHits(positionOf(hit), after) > 0) : ordered;
+    const page = remaining.slice(0, limit);
+    if (liveClient) await addPreviews(liveClient, page);
+
+    const skippedPaths = new Set(scan.skipped.map((entry) => entry.folder));
+    return {
+      messages: page,
+      total: ordered.length,
+      searchedFolders: folders.filter((folder) => !skippedPaths.has(folder)),
+      skippedFolders: scan.skipped,
+      nextCursor: remaining.length > limit ? encodeCursor(positionOf(page[page.length - 1])) : undefined,
+      matchedBy,
+    };
+  } finally {
+    await Promise.all(clients.map((client) => client.logout().catch(() => undefined)));
   }
 }
 

@@ -4,7 +4,7 @@ const mockClient = vi.hoisted(() => ({
   connect: vi.fn(),
   logout: vi.fn(),
   list: vi.fn(),
-  getMailboxLock: vi.fn(async () => ({ release: vi.fn() })),
+  getMailboxLock: vi.fn(async (_path?: string) => ({ release: vi.fn() })),
   messageMove: vi.fn(),
   fetchOne: vi.fn(),
   search: vi.fn(),
@@ -155,10 +155,12 @@ describe('moveMessage', () => {
     expect(mockClient.messageMove).not.toHaveBeenCalled();
   });
 
-  it('allows a recovery move out of Trash', async () => {
+  it('rejects a move out of Trash and never calls messageMove', async () => {
     const imap = await freshImap();
-    await imap.moveMessage({ folder: 'INBOX.Trash', uid: 1, targetFolder: 'INBOX' });
-    expect(mockClient.messageMove).toHaveBeenCalledWith('1', 'INBOX', { uid: true });
+    await expect(
+      imap.moveMessage({ folder: 'INBOX.Trash', uid: 1, targetFolder: 'INBOX' }),
+    ).rejects.toThrow(/out of "INBOX.Trash" is blocked by default/);
+    expect(mockClient.messageMove).not.toHaveBeenCalled();
   });
 
   it('rejects a move to an unresolvable folder', async () => {
@@ -802,3 +804,4 @@ describe('saveDraft', () => {
     expect(mockClient.append).not.toHaveBeenCalled();
   });
 });
+
