@@ -33,6 +33,8 @@ In the Vercel dashboard, under Project Settings → Environment Variables, set:
 | `SUPABASE_URL` | The API URL of the Supabase project used to track moves for undo and to remember mail scanning progress. Set automatically, under this name, by the Vercel integration. |
 | `SUPABASE_SECRET_KEY` | The full-access key for the same Supabase project, in the form `sb_secret_...`. Set automatically by the Vercel integration. It bypasses row level security, so it must stay server-side and must never reach a browser. |
 | `SUPABASE_SERVICE_ROLE_KEY` | The older name for the same thing, used by a Supabase project set up by hand rather than through Vercel. Set one key or the other; `SUPABASE_SECRET_KEY` wins if both are present. |
+| `VERCEL_API_TOKEN` | Optional. Turns on the [settings page](#changing-settings-without-the-vercel-dashboard), which adds and removes the variables in this table without the Vercel dashboard. Create one at vercel.com/account/settings/tokens, scoped to the team that owns this project. |
+| `VERCEL_TEAM_ID` | Optional. Needed alongside `VERCEL_API_TOKEN` when the project belongs to a team rather than a personal account. It starts `team_` and is shown under the team's Settings → General. |
 
 See `.env.example` for local development — copy it to `.env.local` and fill in real values (never commit it).
 
@@ -128,6 +130,25 @@ A free Supabase project pauses itself after seven days with no activity, which w
 There is no `MCP_AUTH_TOKEN` and no other fixed-string route in. A single long-lived secret that unlocks every tool cannot be scoped to a subset of them, attributed to whoever used it, or expired after a leak, and anything that reads it once has the whole mailbox. If you set that variable in an earlier version, delete it from Vercel; it now unlocks nothing. The same goes for `OAUTH_ISSUER`, `OAUTH_AUDIENCE`, `OAUTH_REQUIRED_SCOPE` and `OAUTH_JWKS_URI`, which this version no longer reads.
 
 Anything that cannot open a browser still needs a token, which means completing the passkey sign-in once in a browser and letting the client refresh from there.
+
+## Changing settings without the Vercel dashboard
+
+Once `VERCEL_API_TOKEN` is set, `https://<your-deployment>/settings` lets the owner add, replace and remove the variables above from any browser.
+
+1. Open `/settings` and sign in with your passkey.
+2. Type a name and a value, then choose **Save**. Saving a name that already exists replaces its value.
+3. Choose **Redeploy now**. The running server keeps the old settings until it is rebuilt.
+
+What keeps it safe:
+
+- **Values cannot be read back.** Each one is saved as a Vercel "sensitive" variable, which Vercel never reveals again, not in its dashboard and not through its API. The page lists names, environments and dates only.
+- **Only the owner, only recently.** Every request checks for the owner's session on the server. Any change also needs a passkey sign-in from the last 15 minutes, so a browser left signed in for days cannot be used to change anything.
+- **Only from this site.** A change is refused unless the browser says it came from this site's own page, so another website cannot make one on your behalf.
+- **Some names stay dashboard-only.** `VERCEL_API_TOKEN`, `VERCEL_TEAM_ID`, `BETTER_AUTH_SECRET`, `MCP_OWNER_EMAIL`, `MCP_PUBLIC_URL`, `POSTGRES_URL` and `DATABASE_URL` cannot be changed or removed here. The page itself depends on each of them, and getting one wrong from here would lock you out of the page that could put it right.
+
+The page finds its own project through `VERCEL_PROJECT_ID`, which Vercel supplies as long as **Automatically expose System Environment Variables** is on (Project Settings → Environment Variables; it is on by default).
+
+Sensitive variables apply to production and preview deployments only. Vercel does not offer them for local development, so `.env.local` is still how a laptop gets its settings.
 
 ## Local testing
 
