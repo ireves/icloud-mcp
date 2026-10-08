@@ -73,6 +73,10 @@ Claude works the rest out by itself. It gets a `401`, reads the discovery docume
 
 Test each tool manually before wiring up a scheduled task.
 
+### 7. Add the skill (optional)
+
+`skills/icloud-tasks/SKILL.md` tells Claude how to use this connector cheaply: the main model plans and decides, and Haiku helpers do the searching, reading and carrying out. Zip the `icloud-tasks` folder and upload it in Claude's settings under Capabilities → Skills.
+
 ## Authentication
 
 Two separate things are being protected, and they do not use the same mechanism:
@@ -151,7 +155,7 @@ Both read from a local `.env` file and print what they find. Run them separately
 | `search_mail` | Search every folder except Trash and Junk at once, on the mail server, so old mail is found as easily as new. Matches each word separately (quotes keep a phrase together), filters by sender, recipient, subject and sent date, returns results newest first with their folder and a short untrusted preview, pages with `next_cursor`, falls back to subjects and senders when the text search finds nothing, and reports any folder it could not search |
 | `mark_scanned` | Record how far a folder has been processed; only accepts a UID the server has listed |
 | `reconcile_flagged` | Return messages unflagged since the previous call, so they get sorted |
-| `get_message` | Get full headers and body for one message (HTML converted to plain text, hidden text removed, body marked untrusted) |
+| `get_message` | Get full headers and body for one message (HTML converted to plain text, hidden text removed, body marked untrusted). `max_chars` returns only the start of the body |
 | `mark_message` | Mark a message read/unread |
 | `list_exceptions` | List the operator's standing sorting rules, read from Notion: sender rules, themed rules, timing and the read rule |
 | `move_message` | Move a message to another folder (Trash/Junk, the destination allowlist and the sorting exceptions are all enforced by the server); returns an `operation_id` you can pass to `undo_move` |

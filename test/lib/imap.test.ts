@@ -279,6 +279,33 @@ describe('getMessage — untrusted content marking', () => {
   });
 });
 
+describe('getMessage — max_chars', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('cuts the body short and says so, still inside the untrusted block', async () => {
+    const imap = await freshImap();
+    stubMessage(rawMessage({ text: 'a'.repeat(50) + 'TAIL' }));
+
+    const { body } = await imap.getMessage({ folder: 'INBOX', uid: 7, maxChars: 50 });
+
+    expect(body).not.toContain('TAIL');
+    expect(body).toContain('[... cut short at 50 characters as asked]');
+    expect(body.trimEnd().endsWith('<<<END UNTRUSTED EMAIL BODY>>>')).toBe(true);
+  });
+
+  it('leaves a body that already fits untouched', async () => {
+    const imap = await freshImap();
+    stubMessage(rawMessage({ text: 'Short note.' }));
+
+    const { body } = await imap.getMessage({ folder: 'INBOX', uid: 7, maxChars: 50 });
+
+    expect(body).toContain('Short note.');
+    expect(body).not.toContain('cut short');
+  });
+});
+
 describe('getMessage — hidden text in HTML bodies', () => {
   beforeEach(() => {
     vi.clearAllMocks();

@@ -6,10 +6,13 @@
  * A result must be a JSON object, never a bare array or value, because that is
  * what the protocol allows a structured result to be. A tool whose natural
  * answer is a list wraps it in a named field.
+ *
+ * The text is compact JSON, with no indentation: the reader is a model, and
+ * indentation only adds tokens to every result it reads.
  */
 export function toResult(data: object) {
   return {
-    content: [{ type: 'text' as const, text: JSON.stringify(data, null, 2) }],
+    content: [{ type: 'text' as const, text: JSON.stringify(data) }],
     structuredContent: data as Record<string, unknown>,
   };
 }

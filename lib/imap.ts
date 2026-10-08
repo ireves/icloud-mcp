@@ -891,6 +891,8 @@ export async function searchMail(params: SearchMailParams): Promise<SearchMailRe
 export interface GetMessageParams {
   folder: string;
   uid: number;
+  /** Cuts the body short at this many characters, for a quick look at a message. */
+  maxChars?: number;
 }
 
 export async function getMessage(params: GetMessageParams): Promise<MessageDetail> {
@@ -919,7 +921,10 @@ export async function getMessage(params: GetMessageParams): Promise<MessageDetai
       if (!message) {
         throw new Error(`Message uid ${params.uid} not found in folder ${params.folder}`);
       }
-      const body = await extractBody(message.source as Buffer | undefined);
+      let body = await extractBody(message.source as Buffer | undefined);
+      if (params.maxChars !== undefined && body.length > params.maxChars) {
+        body = `${body.slice(0, params.maxChars)}\n\n[... cut short at ${params.maxChars} characters as asked]`;
+      }
       return {
         ...toSummary(message),
         to: message.envelope?.to?.map((a) => a.address).filter(Boolean).join(', ') ?? '',
