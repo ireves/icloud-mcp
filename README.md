@@ -73,6 +73,17 @@ Claude works the rest out by itself. It gets a `401`, reads the discovery docume
 
 Test each tool manually before wiring up a scheduled task.
 
+### 7. Install as a plugin (optional)
+
+This repository is also a plugin marketplace. Its `icloud` plugin installs the connector (pointing at `https://icloud-mcp-ten.vercel.app/api/mcp`) together with the `icloud-tasks` skill, which has the main model plan and decide while Haiku helpers do the searching, reading and carrying out.
+
+1. In Claude, open **Customize → Plugins**, select **Add marketplace** and enter `ireves/icloud-mcp`.
+2. Install the **iCloud** plugin, then open its **Connectors** tab and connect it. You sign in with your passkey as before.
+3. Turn on **Sync automatically** for the marketplace so changes to the skill arrive without a manual check.
+4. Remove the custom connector from step 6, or every tool appears twice.
+
+The plugin has no `version`, so every commit to `main` counts as a new release. The server itself updates separately, whenever Vercel deploys `main`. If the connector's address ever changes, update `plugins/icloud/.mcp.json`.
+
 ## Authentication
 
 Two separate things are being protected, and they do not use the same mechanism:
@@ -151,7 +162,7 @@ Both read from a local `.env` file and print what they find. Run them separately
 | `search_mail` | Search every folder except Trash and Junk at once, on the mail server, so old mail is found as easily as new. Matches each word separately (quotes keep a phrase together), filters by sender, recipient, subject and sent date, returns results newest first with their folder and a short untrusted preview, pages with `next_cursor`, falls back to subjects and senders when the text search finds nothing, and reports any folder it could not search |
 | `mark_scanned` | Record how far a folder has been processed; only accepts a UID the server has listed |
 | `reconcile_flagged` | Return messages unflagged since the previous call, so they get sorted |
-| `get_message` | Get full headers and body for one message (HTML converted to plain text, hidden text removed, body marked untrusted) |
+| `get_message` | Get full headers and body for one message (HTML converted to plain text, hidden text removed, body marked untrusted). `max_chars` returns only the start of the body |
 | `mark_message` | Mark a message read/unread |
 | `list_exceptions` | List the operator's standing sorting rules, read from Notion: sender rules, themed rules, timing and the read rule |
 | `move_message` | Move a message to another folder (Trash/Junk, the destination allowlist and the sorting exceptions are all enforced by the server); returns an `operation_id` you can pass to `undo_move` |

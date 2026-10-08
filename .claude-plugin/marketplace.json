@@ -1,0 +1,12 @@
+{
+  "name": "icloud-mcp",
+  "description": "Personal marketplace for the iCloud connector and its skill",
+  "owner": { "name": "Iuri Reves" },
+  "plugins": [
+    {
+      "name": "icloud",
+      "source": "./plugins/icloud",
+      "description": "iCloud Mail, Calendar and Reminders connector, with a skill that keeps token use low"
+    }
+  ]
+}

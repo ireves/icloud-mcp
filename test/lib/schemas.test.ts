@@ -48,6 +48,11 @@ describe('result helper', () => {
     expect(JSON.parse(result.content[0].text)).toEqual({ ok: true });
   });
 
+  it('writes the text as compact JSON, with no indentation to spend tokens on', () => {
+    const result = toResult({ a: 1, b: [1, 2] });
+    expect(result.content[0].text).toBe('{"a":1,"b":[1,2]}');
+  });
+
   it('leaves an error result unstructured, so the schema never applies to it', () => {
     const result = toErrorResult(new Error('refused'));
     expect(result).toEqual({
