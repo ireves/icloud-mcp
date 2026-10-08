@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "icloud": {
+      "type": "http",
+      "url": "https://icloud-mcp-ten.vercel.app/api/mcp"
+    }
+  }
+}

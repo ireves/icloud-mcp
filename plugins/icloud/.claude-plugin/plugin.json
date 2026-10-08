@@ -1,0 +1,7 @@
+{
+  "name": "icloud",
+  "displayName": "iCloud",
+  "description": "iCloud Mail, Calendar and Reminders connector, with a skill that has the main model plan and Haiku helpers do the searching and carrying out",
+  "author": { "name": "Iuri Reves" },
+  "repository": "https://github.com/ireves/icloud-mcp"
+}

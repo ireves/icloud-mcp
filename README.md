@@ -73,9 +73,16 @@ Claude works the rest out by itself. It gets a `401`, reads the discovery docume
 
 Test each tool manually before wiring up a scheduled task.
 
-### 7. Add the skill (optional)
+### 7. Install as a plugin (optional)
 
-`skills/icloud-tasks/SKILL.md` tells Claude how to use this connector cheaply: the main model plans and decides, and Haiku helpers do the searching, reading and carrying out. Zip the `icloud-tasks` folder and upload it in Claude's settings under Capabilities → Skills.
+This repository is also a plugin marketplace. Its `icloud` plugin installs the connector (pointing at `https://icloud-mcp-ten.vercel.app/api/mcp`) together with the `icloud-tasks` skill, which has the main model plan and decide while Haiku helpers do the searching, reading and carrying out.
+
+1. In Claude, open **Customize → Plugins**, select **Add marketplace** and enter `ireves/icloud-mcp`.
+2. Install the **iCloud** plugin, then open its **Connectors** tab and connect it. You sign in with your passkey as before.
+3. Turn on **Sync automatically** for the marketplace so changes to the skill arrive without a manual check.
+4. Remove the custom connector from step 6, or every tool appears twice.
+
+The plugin has no `version`, so every commit to `main` counts as a new release. The server itself updates separately, whenever Vercel deploys `main`. If the connector's address ever changes, update `plugins/icloud/.mcp.json`.
 
 ## Authentication
 
